@@ -20,6 +20,6 @@ export function sendApiError(
   status: number,
   publicMessage: string,
 ): void {
-  logApiError(operation, error);
+  if (status >= 500) logApiError(operation, error);
   response.status(status).json({ error: publicMessage });
 }

@@ -1,6 +1,6 @@
 # CyberSentinel-AI
 
-AI-powered security platform that protects sensitive data and AI agents using consent verification, a fail-closed gateway, SHA-256 audit logs, Gemini AI, and secure administrator approvals to prevent unauthorized access.
+AI-assisted dashboard for consent-gated file metadata operations, a fail-closed gateway, SHA-256 audit logs, optional Gemini analysis, and administrator approvals. File registration records a local fingerprint and metadata; it is not malware scanning or operating-system file protection.
 
 This repository contains a hackathon-ready implementation of Stages 1–6. Security-sensitive actions are decided by backend services; Gemini only provides advisory analysis and cannot authorize an operation.
 
@@ -19,9 +19,9 @@ cp .env.example .env
 npm run dev
 ```
 
-Codespaces should forward ports **5173** (React dashboard) and **3001** (Express API). Open port 5173. Vite proxies `/api` requests to the backend. Root `.env` values are loaded by the API and MCP server only; do not prefix server secrets with `VITE_` or place them in frontend code.
+Codespaces should forward ports **5173** (React dashboard) and **3001** (Express API). Open port 5173. Vite proxies `/api` requests to the backend. `npm run dev` starts both services; if running them separately, use `npm run dev:backend` and `npm run dev:frontend`. Root `.env` values are loaded by the API and MCP server only; do not prefix server secrets with `VITE_` or place them in frontend code.
 
-Start both services with `npm run dev`. If you start Vite by itself, `/api` requests return an upstream error until the backend is also running with `npm run dev:backend` on port 3001 (or the port configured by `PORT`).
+The root `.env.example` leaves optional credentials blank. With no Supabase credentials, the dashboard shows **Database not configured** and the API uses ephemeral in-memory storage. If you start Vite by itself, `/api` requests return an upstream error until the backend is running on port 3001 (or the port configured by `PORT`).
 
 The dashboard uses the explicit local demo identity `demo-actor`. In-memory mode is clearly reported in the UI and health response; it is ephemeral and resets when the API restarts. It is suitable for a local demo, not durable data.
 

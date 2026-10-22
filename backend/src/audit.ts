@@ -5,6 +5,7 @@ import { logApiError } from './errors.js';
 
 export interface AuditVerification {
   valid: boolean;
+  storageAvailable: boolean;
   checkedAt: string;
   eventCount: number;
   lastSequence: number;
@@ -80,7 +81,7 @@ export class AuditService {
       this.consistent = false;
       this.lastError = 'Audit storage unavailable';
       return {
-        valid: false, checkedAt: new Date().toISOString(), eventCount: 0,
+        valid: false, storageAvailable: false, checkedAt: new Date().toISOString(), eventCount: 0,
         lastSequence: 0, lastHash: null, error: this.lastError,
       };
     }
@@ -132,6 +133,7 @@ export function verifyAuditChain(events: AuditEvent[], head: AuditHead | null): 
 
   return {
     valid: error === null,
+    storageAvailable: true,
     checkedAt: new Date().toISOString(),
     eventCount: events.length,
     lastSequence: events.at(-1)?.sequence ?? 0,

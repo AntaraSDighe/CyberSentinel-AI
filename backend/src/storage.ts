@@ -30,9 +30,12 @@ export interface ProtectedDataStore {
   updateApproval(request: ApprovalRequest): Promise<ApprovalRequest>;
 }
 
-export interface ApplicationStore extends PlatformStore, ProtectedDataStore {}
+export interface ApplicationStore extends PlatformStore, ProtectedDataStore {
+  readonly databaseConfigured: boolean;
+}
 
 export class MemoryConsentStore implements ApplicationStore {
+  readonly databaseConfigured = false;
   readonly mode = 'in-memory development storage (ephemeral; data is lost on restart)';
   private readonly events: ConsentEvent[] = [];
   private readonly auditEvents: AuditEvent[] = [];
@@ -113,6 +116,7 @@ export class MemoryConsentStore implements ApplicationStore {
 }
 
 class SupabaseConsentStore implements ApplicationStore {
+  readonly databaseConfigured = true;
   readonly mode = 'Supabase PostgreSQL';
 
   constructor(private readonly client: SupabaseClient<any>) {}

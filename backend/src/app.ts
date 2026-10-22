@@ -30,12 +30,18 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '16kb' }));
 
 app.get('/api/health', (_request, response) => {
+  const gateway = consentProjection.health();
   response.status(200).json({
     status: 'ok',
     service: 'cybersentinel-api',
     timestamp: new Date().toISOString(),
     storage: consentService.storageMode,
-    gateway: consentProjection.health(),
+    database: {
+      configured: platformStore.databaseConfigured,
+      available: platformStore.databaseConfigured && gateway.ready && gateway.consistent &&
+        gateway.error === null && gateway.ageMs !== null && gateway.ageMs <= gateway.maxAgeMs,
+    },
+    gateway,
     audit: auditService.health(),
   });
 });

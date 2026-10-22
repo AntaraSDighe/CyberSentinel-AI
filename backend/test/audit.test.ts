@@ -42,7 +42,21 @@ describe('tamper-evident audit chain', () => {
     store.events.pop();
     const result = await audit.verify();
     assert.equal(result.valid, false);
+    assert.equal(result.storageAvailable, true);
     assert.match(result.error ?? '', /head does not match/);
+  });
+
+  it('reports unavailable audit storage separately from a failed chain check', async () => {
+    const store: AuditStore = {
+      mode: 'unavailable test storage',
+      async appendAuditPayload() { throw new Error('database error'); },
+      async listAuditEvents() { throw new Error('database error'); },
+      async getAuditHead() { throw new Error('database error'); },
+    };
+    const result = await new AuditService(store).verify();
+    assert.equal(result.valid, false);
+    assert.equal(result.storageAvailable, false);
+    assert.equal(result.error, 'Audit storage unavailable');
   });
 
   it('rejects missing sequence numbers', () => {

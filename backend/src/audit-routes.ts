@@ -27,7 +27,7 @@ export function createAuditRouter(audit: AuditService, projection: ConsentProjec
     const decision = projection.authorize(actorId, 'audit:read');
     if (!decision.allowed) return response.status(403).json(decision);
     const result = await audit.verify();
-    response.status(result.valid ? 200 : 409).json(result);
+    response.status(!result.storageAvailable ? 503 : result.valid ? 200 : 409).json(result);
   });
   return router;
 }
