@@ -39,4 +39,14 @@ describe('GET /api/health', () => {
     assert.equal(response.status, 404);
     assert.deepEqual(await response.json(), { error: 'Not found' });
   });
+
+  it('returns a safe JSON error for malformed request bodies', async () => {
+    const response = await fetch(`${baseUrl}/api/consents`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: 'Invalid JSON request body' });
+  });
 });

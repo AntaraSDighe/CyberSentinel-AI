@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type { GeminiRiskAnalyzer } from './ai.js';
+import { sendApiError } from './errors.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 
@@ -14,7 +15,7 @@ export function createAiRouter(analyzer: GeminiRiskAnalyzer): Router {
     try {
       response.json(await analyzer.analyze(actorId, operation.trim()));
     } catch (error) {
-      response.status(analyzer.available ? 502 : 503).json({ error: error instanceof Error ? error.message : 'Gemini analysis failed' });
+      sendApiError(response, error, 'ai.analyze', analyzer.available ? 502 : 503, 'Gemini analysis failed');
     }
   });
   return router;

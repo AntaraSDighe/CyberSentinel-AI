@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { ConsentConflictError, ConsentInputError, ConsentService } from './consent.js';
 import type { AuditService } from './audit.js';
+import { sendApiError } from './errors.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 
@@ -13,7 +14,7 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
       if (actorId && !identifierPattern.test(actorId)) return response.status(400).json({ error: 'Invalid actorId' });
       response.json({ storage: service.storageMode, consents: await service.statuses(actorId) });
     } catch (error) {
-      response.status(503).json({ error: messageOf(error) });
+      sendApiError(response, error, 'consent.list', 503, 'Consent storage unavailable');
     }
   });
 
@@ -24,7 +25,7 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
       const events = await service.history(actorId);
       response.json({ actorId, scope, events: events.filter((event) => event.scope === scope) });
     } catch (error) {
-      response.status(503).json({ error: messageOf(error) });
+      sendApiError(response, error, 'consent.history', 503, 'Consent storage unavailable');
     }
   });
 
@@ -34,7 +35,7 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
     try {
       response.json(await service.status(actorId, scope));
     } catch (error) {
-      response.status(503).json({ error: messageOf(error) });
+      sendApiError(response, error, 'consent.status', 503, 'Consent storage unavailable');
     }
   });
 
@@ -48,7 +49,9 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
       await audit.record({ action: 'consent.granted', actorId, resource: scope, operation: 'grant-consent', decision: 'recorded', details: { consentEventId: event.id, expiresAt: event.expires_at } });
       response.status(201).json({ event, status: await service.status(actorId, scope) });
     } catch (error) {
-      response.status(error instanceof ConsentInputError ? 400 : 503).json({ error: messageOf(error) });
+      const invalidInput = error instanceof ConsentInputError;
+      sendApiError(response, error, 'consent.grant', invalidInput ? 400 : 503,
+        invalidInput ? 'expiresAt must be a future ISO-8601 timestamp' : 'Consent storage unavailable');
     }
   });
 
@@ -60,7 +63,9 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
       await audit.record({ action: 'consent.revoked', actorId, resource: scope, operation: 'revoke-consent', decision: 'recorded', details: { consentEventId: event.id } });
       response.status(201).json({ event });
     } catch (error) {
-      response.status(error instanceof ConsentConflictError ? 409 : 503).json({ error: messageOf(error) });
+      const conflict = error instanceof ConsentConflictError;
+      sendApiError(response, error, 'consent.revoke', conflict ? 409 : 503,
+        conflict ? 'Consent cannot be revoked in its current state' : 'Consent storage unavailable');
     }
   });
 
@@ -72,7 +77,9 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
       await audit.record({ action: 'consent.expired', actorId, resource: scope, operation: 'expire-consent', decision: 'recorded', details: { consentEventId: event.id } });
       response.status(201).json({ event });
     } catch (error) {
-      response.status(error instanceof ConsentConflictError ? 409 : 503).json({ error: messageOf(error) });
+      const conflict = error instanceof ConsentConflictError;
+      sendApiError(response, error, 'consent.expire', conflict ? 409 : 503,
+        conflict ? 'Only an elapsed grant can be marked expired' : 'Consent storage unavailable');
     }
   });
 
@@ -81,8 +88,4 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
 
 function validIdentifier(value: unknown): value is string {
   return typeof value === 'string' && identifierPattern.test(value);
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : 'Consent storage unavailable';
 }

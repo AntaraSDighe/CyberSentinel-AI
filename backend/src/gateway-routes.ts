@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { ConsentProjection } from './gateway.js';
 import type { AuditService } from './audit.js';
+import { logApiError } from './errors.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 
@@ -19,9 +20,10 @@ export function createGatewayRouter(projection: ConsentProjection, audit: AuditS
         decision: decision.allowed ? 'allowed' : 'denied', details: { reason: decision.reason, consentStatus: decision.consentStatus },
       });
     } catch (error) {
+      logApiError('gateway.evaluate.audit', error);
       return response.status(503).json({
         ...decision, allowed: false, reason: 'projection_unavailable',
-        auditError: error instanceof Error ? error.message : 'Audit storage unavailable',
+        auditError: 'Audit storage unavailable',
       });
     }
     response.status(decision.allowed ? 200 : 403).json(decision);

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { AuditService } from './audit.js';
 import type { ConsentProjection } from './gateway.js';
+import { sendApiError } from './errors.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 
@@ -17,7 +18,7 @@ export function createAuditRouter(audit: AuditService, projection: ConsentProjec
       const [events, verification] = await Promise.all([audit.list(limit), audit.verify()]);
       response.json({ storage: audit.storageMode, verification, events });
     } catch (error) {
-      response.status(503).json({ error: error instanceof Error ? error.message : 'Audit storage unavailable' });
+      sendApiError(response, error, 'audit.list', 503, 'Audit storage unavailable');
     }
   });
   router.post('/verify', async (request, response) => {

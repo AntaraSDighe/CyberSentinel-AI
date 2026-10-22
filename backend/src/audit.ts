@@ -1,6 +1,7 @@
 import type { AuditEvent, AuditHead, AuditPayload } from './domain.js';
 import { canonicalJson, sha256AuditHash } from './audit-hash.js';
 import type { AuditStore } from './storage.js';
+import { logApiError } from './errors.js';
 
 export interface AuditVerification {
   valid: boolean;
@@ -74,9 +75,10 @@ export class AuditService {
       this.lastError = result.error;
       return result;
     } catch (error) {
+      logApiError('audit.verify', error);
       this.initialized = false;
       this.consistent = false;
-      this.lastError = error instanceof Error ? error.message : 'Audit storage unavailable';
+      this.lastError = 'Audit storage unavailable';
       return {
         valid: false, checkedAt: new Date().toISOString(), eventCount: 0,
         lastSequence: 0, lastHash: null, error: this.lastError,

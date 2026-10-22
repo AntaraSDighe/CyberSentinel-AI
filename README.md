@@ -21,6 +21,8 @@ npm run dev
 
 Codespaces should forward ports **5173** (React dashboard) and **3001** (Express API). Open port 5173. Vite proxies `/api` requests to the backend. Root `.env` values are loaded by the API and MCP server only; do not prefix server secrets with `VITE_` or place them in frontend code.
 
+Start both services with `npm run dev`. If you start Vite by itself, `/api` requests return an upstream error until the backend is also running with `npm run dev:backend` on port 3001 (or the port configured by `PORT`).
+
 The dashboard uses the explicit local demo identity `demo-actor`. In-memory mode is clearly reported in the UI and health response; it is ephemeral and resets when the API restarts. It is suitable for a local demo, not durable data.
 
 ## Supabase setup

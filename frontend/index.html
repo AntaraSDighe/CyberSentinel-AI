@@ -6,6 +6,18 @@
     <meta name="theme-color" content="#09111f" />
     <meta name="description" content="CyberSentinel AI security operations dashboard" />
     <title>CyberSentinel AI | Security Operations</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem('cybersentinel-theme');
+        const theme = savedTheme === 'light' || savedTheme === 'dark'
+          ? savedTheme
+          : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.dataset.theme = theme;
+      } catch {
+        document.documentElement.dataset.theme =
+          window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { ProtectedFileDeniedError, ProtectedFileService } from './protected-files.js';
 import type { AuditService } from './audit.js';
 import type { ConsentProjection } from './gateway.js';
+import { sendApiError } from './errors.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
@@ -64,8 +65,9 @@ export function createFileRouter(files: ProtectedFileService, audit: AuditServic
 }
 
 function sendError(response: import('express').Response, error: unknown): void {
-  const status = error instanceof ProtectedFileDeniedError ? 403 : 503;
-  response.status(status).json({ error: error instanceof Error ? error.message : 'Protected file operation failed' });
+  const denied = error instanceof ProtectedFileDeniedError;
+  sendApiError(response, error, 'protected_file.operation', denied ? 403 : 503,
+    denied ? error.message : 'Protected file service unavailable');
 }
 
 function isIdentifier(value: unknown): value is string {

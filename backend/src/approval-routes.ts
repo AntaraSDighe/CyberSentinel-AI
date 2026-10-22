@@ -4,6 +4,7 @@ import {
 } from './approvals.js';
 import { ProtectedFileDeniedError, ProtectedFileService } from './protected-files.js';
 import type { ConsentProjection } from './gateway.js';
+import { sendApiError } from './errors.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 
@@ -16,7 +17,7 @@ export function createApprovalRouter(approvals: ApprovalService, files: Protecte
     const decision = projection.authorize(actorId, 'approvals:read');
     if (!decision.allowed) return response.status(403).json(decision);
     try { response.json({ requests: await approvals.list(actorId) }); }
-    catch (error) { response.status(503).json({ error: message(error) }); }
+    catch (error) { sendApiError(response, error, 'approvals.list', 503, 'Approval storage unavailable'); }
   });
 
   router.post('/payment-export', async (request, response) => {
@@ -51,9 +52,9 @@ function sendError(response: import('express').Response, error: unknown): void {
   const status = error instanceof ApprovalNotFoundError ? 404
     : error instanceof ApprovalUnavailableError ? 503
       : error instanceof ProtectedFileDeniedError || error instanceof ApprovalDeniedError ? 403 : 503;
-  response.status(status).json({ error: message(error) });
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : 'Approval service unavailable';
+  const publicMessage = error instanceof ApprovalNotFoundError ? 'Approval request not found'
+    : error instanceof ApprovalUnavailableError ? 'Approval delivery is unavailable'
+      : error instanceof ProtectedFileDeniedError || error instanceof ApprovalDeniedError ? error.message
+        : 'Approval service unavailable';
+  sendApiError(response, error, 'approvals.operation', status, publicMessage);
 }

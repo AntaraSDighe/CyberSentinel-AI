@@ -13,6 +13,7 @@ import { createFileRouter } from './file-routes.js';
 import { ApprovalService } from './approvals.js';
 import { createApprovalDelivery } from './approval-delivery.js';
 import { createApprovalRouter } from './approval-routes.js';
+import { logApiError } from './errors.js';
 
 export const app = express();
 const platformStore = createConsentStore();
@@ -48,4 +49,13 @@ app.use('/api/approvals', createApprovalRouter(approvalService, protectedFileSer
 
 app.use((_request, response) => {
   response.status(404).json({ error: 'Not found' });
+});
+
+app.use((error: unknown, request: express.Request, response: express.Response, next: express.NextFunction) => {
+  if (response.headersSent) return next(error);
+  const isInvalidBody = error instanceof SyntaxError && 'body' in error;
+  logApiError(`${request.method} ${request.path}`, error);
+  response.status(isInvalidBody ? 400 : 500).json({
+    error: isInvalidBody ? 'Invalid JSON request body' : 'Internal server error',
+  });
 });

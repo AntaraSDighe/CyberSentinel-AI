@@ -1,5 +1,6 @@
 import type { ConsentEvent, ConsentStatus } from './domain.js';
 import { replayConsent, type ConsentService } from './consent.js';
+import { logApiError } from './errors.js';
 
 export type GatewayReason = 'allowed' | 'consent_missing' | 'consent_revoked' | 'consent_expired' | 'projection_unavailable' | 'projection_stale' | 'projection_inconsistent';
 
@@ -72,7 +73,9 @@ export class ConsentProjection {
       this.lastSyncMs = this.clock();
       this.lastError = null;
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : 'Consent history unavailable';
+      const diagnostic = error instanceof Error ? error.message : 'Consent history unavailable';
+      if (this.lastError !== diagnostic) logApiError('consent_projection.refresh', error);
+      this.lastError = diagnostic;
       if (this.lastSyncMs === null || this.clock() - this.lastSyncMs > this.maxAgeMs) this.ready = false;
     }
   }
@@ -105,7 +108,7 @@ export class ConsentProjection {
       lastSyncAt: this.lastSyncMs === null ? null : new Date(this.lastSyncMs).toISOString(),
       ageMs: this.lastSyncMs === null ? null : Math.max(0, this.clock() - this.lastSyncMs),
       maxAgeMs: this.maxAgeMs,
-      error: this.lastError,
+      error: this.lastError ? 'Consent projection could not be verified' : null,
     };
   }
 
