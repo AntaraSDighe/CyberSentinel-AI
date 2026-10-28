@@ -30,7 +30,11 @@ describe('GET /api/health', () => {
     assert.equal(body.status, 'ok');
     assert.equal(body.service, 'cybersentinel-api');
     assert.match(body.storage as string, /in-memory development storage|Supabase PostgreSQL/);
-    assert.deepEqual(body.database, { configured: false, available: false });
+    assert.deepEqual(body.database, {
+      configured: false,
+      available: false,
+      error: 'Supabase credentials are not configured; using ephemeral in-memory storage',
+    });
     assert.equal(typeof body.timestamp, 'string');
     assert.ok(Number.isFinite(Date.parse(body.timestamp as string)));
   });

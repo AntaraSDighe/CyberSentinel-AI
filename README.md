@@ -19,7 +19,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Codespaces should forward ports **5173** (React dashboard) and **3001** (Express API). Open port 5173. Vite proxies `/api` requests to the backend. `npm run dev` starts both services; if running them separately, use `npm run dev:backend` and `npm run dev:frontend`. Root `.env` values are loaded by the API and MCP server only; do not prefix server secrets with `VITE_` or place them in frontend code.
+Codespaces forwards ports **5173** (React dashboard) and **3001** (Express API) privately using `.devcontainer/devcontainer.json`. Open the forwarded port 5173 URL. Vite proxies `/api` requests to the backend. `npm run dev` starts both services; if running them separately, use `npm run dev:backend` and `npm run dev:frontend`. Root `.env` values are loaded by the API and MCP server only; do not prefix server secrets with `VITE_` or place them in frontend code.
 
 The root `.env.example` leaves optional credentials blank. With no Supabase credentials, the dashboard shows **Database not configured** and the API uses ephemeral in-memory storage. If you start Vite by itself, `/api` requests return an upstream error until the backend is running on port 3001 (or the port configured by `PORT`).
 
@@ -34,6 +34,8 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
 ```
 
+For Codespaces, add repository or organization secrets named `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` under **Settings → Secrets and variables → Codespaces**. Restart the Codespace after changing its secrets, then restart the backend. For local development, put the values in the repository-root `.env` file. Do not use a `VITE_` prefix, paste the service-role key into frontend code, or commit the file. To restart the API, stop its terminal and run `npm run dev:backend` again; if using `npm run dev`, stop and rerun that command.
+
 Apply the SQL files in `supabase/migrations/` to the Supabase project, in filename order. They create/extend the expected `actor_profiles`, `consent_events`, `audit_events`, `audit_chain_heads`, `protected_files`, and `approval_requests` schemas, including consent/audit mutation guards and the serialized audit append function. If those tables already exist with a different schema, reconcile the migration with the existing columns before applying it. Restart the API after configuring Supabase. Both Supabase variables are required together; partial configuration prevents startup rather than silently falling back to memory.
 
 The Supabase service-role key is privileged and must remain in the backend environment. Do not expose it to the Vite client. The example uses placeholders only.
@@ -47,6 +49,8 @@ In **Consent Management**, grant the demo identity scopes before using protected
 - `payments:export` to request a sensitive metadata export
 - `audit:read` to list or verify audit history
 - `approvals:read` to list approval requests
+
+The demo dashboard uses actor `demo-actor`. Listing that actor's registered metadata requires `files:read`; registering file metadata requires `files:register`. Listing that actor's own approval requests requires `approvals:read`. These grants are actor- and scope-specific and do not provide access to another actor's records. `approvals:read` is not administrator authentication: an approval state change still requires the one-time code delivered through the configured administrator channel. The local demo identity is not a real authenticated user and must not be exposed publicly.
 
 Consent history is append-only and replayed to derive current state. Revocation updates this API process immediately; the in-memory projection reconciles external database changes every second and denies protected actions if it is unavailable, inconsistent, or older than five seconds.
 

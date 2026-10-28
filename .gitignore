@@ -4,5 +4,11 @@ backend/dist/
 .env
 .env.*
 !.env.example
+secrets/
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
 npm-debug.log*
 frontend/*.tsbuildinfo

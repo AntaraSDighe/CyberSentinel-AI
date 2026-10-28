@@ -31,6 +31,10 @@ app.use(express.json({ limit: '16kb' }));
 
 app.get('/api/health', (_request, response) => {
   const gateway = consentProjection.health();
+  const audit = auditService.health();
+  const databaseAvailable = platformStore.databaseConfigured && gateway.ready && gateway.consistent &&
+    gateway.error === null && gateway.ageMs !== null && gateway.ageMs <= gateway.maxAgeMs &&
+    audit.ready && audit.consistent;
   response.status(200).json({
     status: 'ok',
     service: 'cybersentinel-api',
@@ -38,11 +42,15 @@ app.get('/api/health', (_request, response) => {
     storage: consentService.storageMode,
     database: {
       configured: platformStore.databaseConfigured,
-      available: platformStore.databaseConfigured && gateway.ready && gateway.consistent &&
-        gateway.error === null && gateway.ageMs !== null && gateway.ageMs <= gateway.maxAgeMs,
+      available: databaseAvailable,
+      error: !platformStore.databaseConfigured
+        ? 'Supabase credentials are not configured; using ephemeral in-memory storage'
+        : databaseAvailable
+          ? null
+          : 'Supabase storage could not be verified; check credentials and apply migrations',
     },
     gateway,
-    audit: auditService.health(),
+    audit,
   });
 });
 

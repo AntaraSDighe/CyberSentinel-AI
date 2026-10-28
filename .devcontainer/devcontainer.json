@@ -1,0 +1,15 @@
+{
+  "forwardPorts": [5173, 3001],
+  "portsAttributes": {
+    "5173": {
+      "label": "CyberSentinel dashboard",
+      "onAutoForward": "openBrowser",
+      "visibility": "private"
+    },
+    "3001": {
+      "label": "CyberSentinel API",
+      "onAutoForward": "silent",
+      "visibility": "private"
+    }
+  }
+}

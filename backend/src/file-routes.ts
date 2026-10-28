@@ -66,8 +66,18 @@ export function createFileRouter(files: ProtectedFileService, audit: AuditServic
 
 function sendError(response: import('express').Response, error: unknown): void {
   const denied = error instanceof ProtectedFileDeniedError;
-  sendApiError(response, error, 'protected_file.operation', denied ? 403 : 503,
-    denied ? error.message : 'Protected file service unavailable');
+  if (denied) {
+    if (error.decision) {
+      response.status(403).json({
+        error: 'Consent is required for this protected file operation',
+        ...error.decision,
+      });
+      return;
+    }
+    response.status(403).json({ error: error.message });
+    return;
+  }
+  sendApiError(response, error, 'protected_file.operation', 503, 'Protected file service unavailable');
 }
 
 function isIdentifier(value: unknown): value is string {

@@ -226,5 +226,26 @@ export function createConsentStore(env: NodeJS.ProcessEnv = process.env): Applic
     throw new Error('Both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to enable Supabase storage');
   }
   if (!url || !serviceRoleKey) return new MemoryConsentStore();
-  return new SupabaseConsentStore(createClient<any>(url, serviceRoleKey, { auth: { persistSession: false } }));
+
+  let projectUrl: URL;
+  try {
+    projectUrl = new URL(url);
+  } catch {
+    throw new Error('SUPABASE_URL must be a valid HTTP(S) URL');
+  }
+  if (!['http:', 'https:'].includes(projectUrl.protocol) || !projectUrl.hostname || projectUrl.username || projectUrl.password) {
+    throw new Error('SUPABASE_URL must be a valid HTTP(S) URL');
+  }
+
+  const isSecretKey = /^sb_secret_[A-Za-z0-9_-]+$/.test(serviceRoleKey);
+  const isLegacyServiceKey = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(serviceRoleKey);
+  if (!isSecretKey && !isLegacyServiceKey) {
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY is not in a recognized Supabase key format');
+  }
+
+  try {
+    return new SupabaseConsentStore(createClient<any>(projectUrl.toString(), serviceRoleKey, { auth: { persistSession: false } }));
+  } catch {
+    throw new Error('Could not initialize Supabase client; check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+  }
 }

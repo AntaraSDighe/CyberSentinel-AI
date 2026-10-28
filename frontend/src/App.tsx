@@ -26,7 +26,7 @@ type ProtectedFile = { id: string; actor_id: string; name: string; size: number;
 type Approval = { id: string; actor_id: string; file_id: string; status: string; expires_at: string; created_at: string };
 type ApiHealth = { status?: string; storage?: string; database?: { configured: boolean; available: boolean }; gateway?: { ready: boolean; consistent: boolean; ageMs: number | null; error: string | null }; audit?: { ready: boolean; consistent: boolean; error: string | null } };
 type DataSource = 'health' | 'consents' | 'files' | 'approvals' | 'approvalStatus' | 'ai';
-type DataLoadState = 'loading' | 'available' | 'unavailable';
+type DataLoadState = 'loading' | 'available' | 'denied' | 'unavailable';
 type DataLoadStates = Record<DataSource, DataLoadState>;
 type AuditCheck = { valid: boolean | null; eventCount: number; error: string | null; storageAvailable?: boolean };
 
@@ -78,7 +78,12 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     if (typeof body === 'object' && body !== null) {
       const errorMessage = 'error' in body && typeof body.error === 'string' ? body.error : undefined;
       const denialReason = 'reason' in body && typeof body.reason === 'string' ? body.reason : undefined;
-      throw new ApiResponseError(errorMessage ?? (denialReason ? `Access denied: ${denialReason}` : `API request failed (HTTP ${response.status}).`), response.status, body);
+      const scope = 'scope' in body && typeof body.scope === 'string' ? body.scope : undefined;
+      const actorId = 'actorId' in body && typeof body.actorId === 'string' ? body.actorId : undefined;
+      const message = response.status === 403 && denialReason === 'consent_missing' && scope
+        ? `Consent required: ${scope} for ${actorId ?? 'this actor'}. Grant this scope in Consent Management, then retry.`
+        : errorMessage ?? (denialReason ? `Access denied: ${denialReason}` : `API request failed (HTTP ${response.status}).`);
+      throw new ApiResponseError(message, response.status, body);
     }
     throw new ApiResponseError(`API request failed (HTTP ${response.status}).`, response.status, body);
   }
@@ -147,7 +152,11 @@ function App() {
       const nextStates = {} as DataLoadStates;
       const nextErrors: Partial<Record<DataSource, string>> = {};
       for (const [source, result] of Object.entries(results) as Array<[DataSource, (typeof results)[DataSource]]>) {
-        nextStates[source] = result.status === 'fulfilled' ? 'available' : 'unavailable';
+        nextStates[source] = result.status === 'fulfilled'
+          ? 'available'
+          : result.reason instanceof ApiResponseError && result.reason.status === 403
+            ? 'denied'
+            : 'unavailable';
         if (result.status === 'rejected') {
           nextErrors[source] = result.reason instanceof Error ? result.reason.message : 'The API request failed.';
         }
@@ -258,7 +267,7 @@ function App() {
     approvalStatus: 'GET /api/approvals/status',
     ai: 'GET /api/ai/status',
   };
-  const unavailableSources = viewSources[view].filter((source) => dataLoadStates[source] === 'unavailable');
+  const unavailableSources = viewSources[view].filter((source) => dataLoadStates[source] === 'unavailable' || dataLoadStates[source] === 'denied');
 
   return (
     <div className="app-shell">
@@ -280,7 +289,7 @@ function App() {
           <div className="view-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> CYBERSENTINEL AI · LIVE WORKSPACE</div><h1>{view}<span className="heading-period">.</span></h1><p className="page-subtitle">{viewDescription(view)}</p></div><button className="refresh-button" onClick={() => void refresh()} disabled={busy || refreshing}><RefreshCw size={15} /> {refreshing ? 'Refreshing' : 'Refresh'}</button></div>
           {error && <div className="notice notice-error" role="alert"><AlertTriangle size={17} />{error}</div>}
           {notice && <div className="notice notice-ok" role="status"><Check size={17} />{notice}</div>}
-          {unavailableSources.length > 0 && <div className="notice notice-warning" role="status"><AlertTriangle size={17} /><span>{unavailableSources.map((source) => `${sourcePaths[source]}: ${dataLoadErrors[source] ?? 'Unavailable'}`).join(' · ')}</span><button className="text-button" disabled={refreshing} onClick={() => void refresh()}>Retry</button></div>}
+          {unavailableSources.length > 0 && <div className="notice notice-warning" role="status"><AlertTriangle size={17} /><span>{unavailableSources.map((source) => `${sourcePaths[source]}: ${dataLoadErrors[source] ?? (dataLoadStates[source] === 'denied' ? 'Access denied' : 'Unavailable')}`).join(' · ')}</span>{unavailableSources.some((source) => dataLoadStates[source] === 'unavailable') && <button className="text-button" disabled={refreshing} onClick={() => void refresh()}>Retry</button>}</div>}
           {dataLoadStates.health === 'available' && health?.database?.configured === false && <div className="notice notice-warning" role="status"><AlertTriangle size={17} /><span><strong>Database not configured.</strong> The API is using temporary in-memory storage; data is lost when it restarts. Configure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the root .env file, then restart the backend.</span></div>}
           {dataLoadStates.health === 'available' && health?.database?.configured === true && health.database.available === false && <div className="notice notice-warning" role="status"><AlertTriangle size={17} /><span><strong>Supabase is configured but unavailable.</strong> Check the backend logs, credentials, network, and database migrations. Protected operations remain fail-closed.</span></div>}
 
@@ -312,6 +321,7 @@ function Overview({ health, geminiAvailable, aiState, activeConsents, fileCount,
 
 function loadStateLabel(state: DataLoadState): string {
   if (state === 'available') return 'Available';
+  if (state === 'denied') return 'Consent required';
   return state === 'loading' ? 'Loading' : 'Unavailable';
 }
 
@@ -361,7 +371,7 @@ function FilesPage({ files, loadStatus, file, setFile, permissions, setPermissio
   return <>
     <div className="notice notice-warning"><AlertTriangle size={18} /><span><strong>Browser metadata protection only.</strong> The app fingerprints the selected file in your browser and stores metadata, not file contents. This cannot prevent other desktop applications from opening or copying local files. No contents are sent to Gemini.</span></div>
     <section className="form-panel"><div className="section-heading"><div><div className="section-kicker">LOCAL FINGERPRINT</div><h3>Register file metadata</h3></div><span className="stage-tag">SHA-256</span></div><div className="file-form"><label className="file-picker"><FileKey2 size={18} /><span>{file ? file.name : 'Choose a file from this device'}</span><input id="protected-file-picker" type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label><div className="permission-checks"><label><input type="checkbox" checked={permissions.read} onChange={(event) => setPermissions({ ...permissions, read: event.target.checked })} /> Allow read</label><label><input type="checkbox" checked={permissions.export} onChange={(event) => setPermissions({ ...permissions, export: event.target.checked })} /> Allow approved metadata export</label></div><button className="primary-button" disabled={!file || busy} onClick={onRegister}>Fingerprint & register metadata</button></div></section>
-    <DataTable title="Registered files" description="All protected operations are gateway-checked and audited." columns={['File', 'Fingerprint', 'Permissions', 'Registered', 'Actions']} loadStatus={loadStatus} empty={loadStatus === 'unavailable' ? 'Protected files unavailable. Check the API error above; grant files:read consent if access was denied, then retry.' : loadStatus === 'loading' ? 'Loading protected files…' : files.length === 0 ? 'No file metadata registered.' : undefined}>
+    <DataTable title="Registered files" description="All protected operations are gateway-checked and audited." columns={['File', 'Fingerprint', 'Permissions', 'Registered', 'Actions']} loadStatus={loadStatus} empty={loadStatus === 'denied' ? 'Grant files:read consent to demo-actor in Consent Management to view its registered file metadata.' : loadStatus === 'unavailable' ? 'Protected file metadata is unavailable. Check the API and database status above, then retry.' : loadStatus === 'loading' ? 'Loading protected files…' : files.length === 0 ? 'No file metadata registered.' : undefined}>
       {files.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small className="cell-subtitle">{formatBytes(item.size)} · {item.content_type}</small></td><td><code className="hash-short">{item.sha256}</code></td><td>{item.permissions.join(', ') || 'None'}</td><td>{formatDate(item.created_at)}</td><td className="table-actions"><button className="text-button" onClick={() => onAccess(item.id)}>Check access</button><button className="text-button" onClick={() => void loadHistory(item.id)}>History</button>{item.permissions.includes('export') && <button className="text-button" onClick={() => onRequestExport(item.id)}>Request export</button>}</td></tr>)}
     </DataTable>
     {historyError && <div className="notice notice-warning" role="alert"><AlertTriangle size={17} /><span>{historyError}</span><button className="text-button" onClick={() => void loadHistory(historyFileId)}>Retry</button></div>}
@@ -447,14 +457,14 @@ function ApprovalsPage({ requests, loadStatus, statusLoadStatus, status, otp, se
   return <>
     <div className={`notice ${serviceAvailable ? 'notice-ok' : 'notice-warning'}`}><LockKeyhole size={18} /><span><strong>{statusTitle}</strong> {statusDetails}</span></div>
     <section className="form-panel"><div className="section-heading"><div><div className="section-kicker">ADMINISTRATOR ACTION</div><h3>Approve a pending metadata export</h3></div><span className="stage-tag">60 SECOND OTP</span></div><div className="form-row approval-form"><label>Delivered OTP<input inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6-digit code" /></label><span className="form-note">Select a request below to submit this code. Only an administrator with access to the configured delivery channel can approve.</span></div></section>
-    <DataTable title="Approval requests" description="Expired requests are automatically denied when listed or used." columns={['Request', 'File', 'Status', 'Deadline', 'Actions']} loadStatus={loadStatus} empty={loadStatus === 'unavailable' ? 'Approval requests unavailable. Check the API error above; grant approvals:read consent if access was denied, then retry.' : loadStatus === 'loading' ? 'Loading approval requests…' : requests.length === 0 ? 'No approval requests.' : undefined}>
+    <DataTable title="Approval requests" description="Requests are actor-scoped. Viewing requires approvals:read consent; approving a request still requires its administrator-delivered OTP." columns={['Request', 'File', 'Status', 'Deadline', 'Actions']} loadStatus={loadStatus} empty={loadStatus === 'denied' ? 'Grant approvals:read consent to demo-actor in Consent Management to view its requests. Approval actions still require the delivered administrator OTP.' : loadStatus === 'unavailable' ? 'Approval request storage is unavailable. Check the API and database status above, then retry.' : loadStatus === 'loading' ? 'Loading approval requests…' : requests.length === 0 ? 'No approval requests.' : undefined}>
       {requests.map((request) => <tr key={request.id}><td><code className="id-short">{request.id}</code><small className="cell-subtitle">Created {formatDate(request.created_at)}</small></td><td>{request.file_id}</td><td><StatusBadge status={request.status} /></td><td>{formatDate(request.expires_at)}</td><td className="table-actions">{request.status === 'pending' && <button className="text-button" disabled={busy || otp.length !== 6} onClick={() => onApprove(request.id)}>Approve</button>}{request.status === 'approved' && <button className="text-button" disabled={busy} onClick={() => onRelease(request.id)}>Release metadata</button>}</td></tr>)}
     </DataTable>
   </>;
 }
 
 function DataTable({ title, description, columns, empty, loadStatus, children }: { title: string; description: string; columns: string[]; empty?: string; loadStatus?: DataLoadState; children?: ReactNode }) {
-  const countLabel = loadStatus === 'unavailable' ? 'UNAVAILABLE' : loadStatus === 'loading' ? 'LOADING' : empty ? '0' : 'LIVE';
+  const countLabel = loadStatus === 'denied' ? 'CONSENT REQUIRED' : loadStatus === 'unavailable' ? 'UNAVAILABLE' : loadStatus === 'loading' ? 'LOADING' : empty ? '0' : 'LIVE';
   return <section className="table-panel"><div className="section-heading"><div><div className="section-kicker">SECURE RECORDS</div><h3>{title}</h3><p className="table-description">{description}</p></div><span className="table-count">{countLabel}</span></div>{empty ? <div className="empty-state"><ClipboardCheck size={19} /><span>{empty}</span></div> : <div className="table-scroll"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{children}</tbody></table></div>}</section>;
 }
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AuditService } from './audit.js';
 import type { ProtectedFileRecord } from './domain.js';
-import type { ConsentProjection } from './gateway.js';
+import type { ConsentProjection, GatewayDecision } from './gateway.js';
 import type { ProtectedDataStore } from './storage.js';
 
 export class ProtectedFileService {
@@ -56,8 +56,14 @@ export class ProtectedFileService {
       action, actorId, resource, operation: action, decision: decision.allowed ? 'allowed' : 'denied',
       details: { reason: decision.reason },
     });
-    if (!decision.allowed) throw new ProtectedFileDeniedError(`Denied by security gateway: ${decision.reason}`);
+    if (!decision.allowed) {
+      throw new ProtectedFileDeniedError(`Denied by security gateway: ${decision.reason}`, decision);
+    }
   }
 }
 
-export class ProtectedFileDeniedError extends Error {}
+export class ProtectedFileDeniedError extends Error {
+  constructor(message: string, readonly decision?: GatewayDecision) {
+    super(message);
+  }
+}
