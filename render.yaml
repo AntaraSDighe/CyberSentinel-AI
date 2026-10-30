@@ -1,0 +1,59 @@
+services:
+  - type: web
+    name: cybersentinel-api
+    runtime: node
+    plan: starter
+    buildCommand: >-
+      npm ci &&
+      env -u NODE_ENV -u SUPABASE_URL -u SUPABASE_ANON_KEY -u SUPABASE_SERVICE_ROLE_KEY -u GEMINI_API_KEY
+      -u OTP_SECRET -u CORS_ORIGIN -u SMTP_HOST -u SMTP_USER -u SMTP_PASSWORD
+      -u SMTP_FROM -u ADMIN_EMAIL -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID
+      npm test --workspace backend &&
+      npm run build --workspace backend
+    startCommand: npm run start --workspace backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: NODE_ENV
+        value: production
+      - key: DEV_OTP_DELIVERY
+        value: "false"
+      - key: DEMO_CONSENT_SETUP
+        value: "false"
+      - key: DEMO_AUTH
+        value: "false"
+      - key: DEMO_GRANT_APPROVALS_READ
+        value: "false"
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: OTP_SECRET
+        generateValue: true
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURE
+        value: "false"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
