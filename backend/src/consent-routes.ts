@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { ConsentConflictError, ConsentInputError, ConsentService } from './consent.js';
 import type { AuditService } from './audit.js';
 import { sendApiError } from './errors.js';
+import { actorIdFor } from './authentication.js';
 
 const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
 
@@ -10,8 +11,7 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
 
   router.get('/', async (request, response) => {
     try {
-      const actorId = typeof request.query.actorId === 'string' ? request.query.actorId : undefined;
-      if (actorId && !identifierPattern.test(actorId)) return response.status(400).json({ error: 'Invalid actorId' });
+      const actorId = actorIdFor(request);
       response.json({ storage: service.storageMode, consents: await service.statuses(actorId) });
     } catch (error) {
       sendApiError(response, error, 'consent.list', 503, 'Consent storage unavailable');
@@ -19,8 +19,10 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
   });
 
   router.get('/:actorId/:scope/events', async (request, response) => {
-    const { actorId, scope } = request.params;
-    if (!validIdentifier(actorId) || !validIdentifier(scope)) return response.status(400).json({ error: 'Invalid actorId or scope' });
+    const { scope } = request.params;
+    const actorId = actorIdFor(request);
+    if (request.params.actorId !== actorId) return response.status(403).json({ error: 'Access to another actor is denied' });
+    if (!validIdentifier(scope)) return response.status(400).json({ error: 'Invalid scope' });
     try {
       const events = await service.history(actorId);
       response.json({ actorId, scope, events: events.filter((event) => event.scope === scope) });
@@ -30,8 +32,10 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
   });
 
   router.get('/:actorId/:scope', async (request, response) => {
-    const { actorId, scope } = request.params;
-    if (!validIdentifier(actorId) || !validIdentifier(scope)) return response.status(400).json({ error: 'Invalid actorId or scope' });
+    const { scope } = request.params;
+    const actorId = actorIdFor(request);
+    if (request.params.actorId !== actorId) return response.status(403).json({ error: 'Access to another actor is denied' });
+    if (!validIdentifier(scope)) return response.status(400).json({ error: 'Invalid scope' });
     try {
       response.json(await service.status(actorId, scope));
     } catch (error) {
@@ -40,9 +44,10 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
   });
 
   router.post('/', async (request, response) => {
-    const { actorId, scope, expiresAt = null } = request.body ?? {};
-    if (!validIdentifier(actorId) || !validIdentifier(scope) || (expiresAt !== null && typeof expiresAt !== 'string')) {
-      return response.status(400).json({ error: 'actorId and scope are required; expiresAt must be an ISO-8601 string or null' });
+    const { scope, expiresAt = null } = request.body ?? {};
+    const actorId = actorIdFor(request);
+    if (!validIdentifier(scope) || (expiresAt !== null && typeof expiresAt !== 'string')) {
+      return response.status(400).json({ error: 'scope is required; expiresAt must be an ISO-8601 string or null' });
     }
     try {
       const event = await service.grant(actorId, scope, expiresAt);
@@ -56,8 +61,10 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
   });
 
   router.post('/:actorId/:scope/revoke', async (request, response) => {
-    const { actorId, scope } = request.params;
-    if (!validIdentifier(actorId) || !validIdentifier(scope)) return response.status(400).json({ error: 'Invalid actorId or scope' });
+    const { scope } = request.params;
+    const actorId = actorIdFor(request);
+    if (request.params.actorId !== actorId) return response.status(403).json({ error: 'Access to another actor is denied' });
+    if (!validIdentifier(scope)) return response.status(400).json({ error: 'Invalid scope' });
     try {
       const event = await service.revoke(actorId, scope);
       await audit.record({ action: 'consent.revoked', actorId, resource: scope, operation: 'revoke-consent', decision: 'recorded', details: { consentEventId: event.id } });
@@ -70,8 +77,10 @@ export function createConsentRouter(service: ConsentService, audit: AuditService
   });
 
   router.post('/:actorId/:scope/expire', async (request, response) => {
-    const { actorId, scope } = request.params;
-    if (!validIdentifier(actorId) || !validIdentifier(scope)) return response.status(400).json({ error: 'Invalid actorId or scope' });
+    const { scope } = request.params;
+    const actorId = actorIdFor(request);
+    if (request.params.actorId !== actorId) return response.status(403).json({ error: 'Access to another actor is denied' });
+    if (!validIdentifier(scope)) return response.status(400).json({ error: 'Invalid scope' });
     try {
       const event = await service.expire(actorId, scope);
       await audit.record({ action: 'consent.expired', actorId, resource: scope, operation: 'expire-consent', decision: 'recorded', details: { consentEventId: event.id } });

@@ -2,8 +2,13 @@ import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { ApprovalRequest, ProtectedFileRecord } from './domain.js';
 import type { AuditService } from './audit.js';
 import type { ConsentProjection } from './gateway.js';
-import type { ApprovalDelivery } from './approval-delivery.js';
+import {
+  getApprovalDeliveryRequirementAlternatives,
+  getDevelopmentOtpConfigurationWarning,
+  type ApprovalDelivery,
+} from './approval-delivery.js';
 import type { ProtectedDataStore } from './storage.js';
+import { logApiError } from './errors.js';
 
 export class ApprovalService {
   private readonly locks = new Map<string, Promise<void>>();
@@ -20,8 +25,35 @@ export class ApprovalService {
     this.secret = secret;
   }
 
-  get status(): { available: boolean; deliveryChannel: string | null; otpConfigured: boolean; deadlineSeconds: number } {
-    return { available: this.delivery.available && this.secret.length >= 32, deliveryChannel: this.delivery.channel, otpConfigured: this.secret.length >= 32, deadlineSeconds: 60 };
+  get status(): {
+    available: boolean;
+    deliveryChannel: string | null;
+    otpConfigured: boolean;
+    missingVariableNames: string[];
+    deliveryRequirementAlternatives: string[][];
+    deadlineSeconds: number;
+    configurationError: string | null;
+  } {
+    return {
+      available: this.delivery.available && this.secret.trim().length >= 32,
+      deliveryChannel: this.delivery.channel,
+      otpConfigured: this.secret.trim().length >= 32,
+      missingVariableNames: this.secret.trim().length >= 32 ? [] : ['OTP_SECRET'],
+      deliveryRequirementAlternatives: this.delivery.available ? [] : getApprovalDeliveryRequirementAlternatives(),
+      deadlineSeconds: 60,
+      configurationError: this.configurationError,
+    };
+  }
+
+  get configurationError(): string | null {
+    const issues: string[] = [];
+    if (this.secret.trim().length < 32) issues.push('Set OTP_SECRET to at least 32 random characters (generate one with: openssl rand -hex 32).');
+    if (!this.delivery.available) {
+      const developmentWarning = getDevelopmentOtpConfigurationWarning();
+      if (developmentWarning) issues.push(developmentWarning);
+      issues.push('Configure SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, and ADMIN_EMAIL, or TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID. For local development only, set DEV_OTP_DELIVERY=true and run npm run dev:backend.');
+    }
+    return issues.length > 0 ? issues.join(' ') : null;
   }
 
   async list(actorId?: string): Promise<Array<Omit<ApprovalRequest, 'otp_hash'>>> {
@@ -37,7 +69,7 @@ export class ApprovalService {
   }
 
   async requestExport(actorId: string, file: ProtectedFileRecord): Promise<Omit<ApprovalRequest, 'otp_hash'>> {
-    if (!this.status.available) throw new ApprovalUnavailableError('OTP secret and a working email or Telegram delivery provider are required');
+    if (!this.status.available) throw new ApprovalUnavailableError(this.configurationError ?? 'Approval delivery is unavailable');
     if (!file.permissions.includes('export')) throw new ApprovalDeniedError('File metadata does not permit export');
     const decision = this.projection.authorize(actorId, 'payments:export');
     await this.audit.record({
@@ -64,7 +96,8 @@ export class ApprovalService {
     } catch (error) {
       await this.store.updateApproval({ ...saved, status: 'failed' });
       await this.audit.record({ action: 'approval.delivery-failed', actorId, resource: id, operation: 'deliver-otp', decision: 'error', details: {} }).catch(() => undefined);
-      throw new ApprovalUnavailableError(error instanceof Error ? error.message : 'OTP delivery failed');
+      logApiError('approvals.otp_delivery', error);
+      throw new ApprovalUnavailableError('OTP delivery failed; check the backend terminal for a sanitized diagnostic');
     }
     const { otp_hash: _otpHash, ...safeRequest } = saved;
     return safeRequest;

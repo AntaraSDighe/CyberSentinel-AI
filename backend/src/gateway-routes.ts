@@ -2,16 +2,16 @@ import { Router } from 'express';
 import type { ConsentProjection } from './gateway.js';
 import type { AuditService } from './audit.js';
 import { logApiError } from './errors.js';
-
-const identifierPattern = /^[a-zA-Z0-9._:-]{1,128}$/;
+import { actorIdFor } from './authentication.js';
 
 export function createGatewayRouter(projection: ConsentProjection, audit: AuditService): Router {
   const router = Router();
   router.get('/health', (_request, response) => response.json(projection.health()));
   router.post('/evaluate', async (request, response) => {
-    const { actorId, scope } = request.body ?? {};
-    if (typeof actorId !== 'string' || !identifierPattern.test(actorId) || typeof scope !== 'string' || !identifierPattern.test(scope)) {
-      return response.status(400).json({ error: 'actorId and scope are required identifiers' });
+    const { scope } = request.body ?? {};
+    const actorId = actorIdFor(request);
+    if (typeof scope !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(scope)) {
+      return response.status(400).json({ error: 'scope is required as an identifier' });
     }
     const decision = projection.authorize(actorId, scope);
     try {

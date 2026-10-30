@@ -9,9 +9,9 @@ services:
       -u OTP_SECRET -u CORS_ORIGIN -u SMTP_HOST -u SMTP_USER -u SMTP_PASSWORD
       -u SMTP_FROM -u ADMIN_EMAIL -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID
       npm test --workspace backend &&
-      npm run build --workspace backend
+      npm run build
     startCommand: npm run start --workspace backend
-    healthCheckPath: /api/health
+    healthCheckPath: /api/health/live
     envVars:
       - key: NODE_VERSION
         value: 22.16.0
@@ -37,7 +37,9 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: CORS_ORIGIN
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
         sync: false
       - key: SMTP_HOST
         sync: false

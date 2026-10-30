@@ -49,6 +49,24 @@ describe('administrator approvals', () => {
     assert.equal((await h.approvals.list()).length, 0);
   });
 
+  it('explains missing OTP configuration without exposing configuration values', async () => {
+    const h = harness({ available: false });
+    const service = new ApprovalService(
+      h.store, { available: false, channel: null, async send() {} },
+      h.audit, h.projection, '',
+    );
+
+    assert.equal(service.status.available, false);
+    assert.match(service.status.configurationError ?? '', /OTP_SECRET/);
+    assert.match(service.status.configurationError ?? '', /SMTP_HOST/);
+    await initialize(h);
+    await assert.rejects(
+      service.requestExport('actor-1', h.file),
+      (error: unknown) => error instanceof ApprovalUnavailableError && /OTP_SECRET/.test(error.message),
+    );
+    assert.equal((await h.approvals.list()).length, 0);
+  });
+
   it('keeps the OTP server-side and requires the correct code before release', async () => {
     const h = harness();
     await initialize(h);

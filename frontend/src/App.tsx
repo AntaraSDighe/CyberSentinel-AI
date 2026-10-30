@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { FormEvent, ReactNode } from 'react';
 import {
-  Activity, AlertTriangle, Bot, Check, ChevronDown, CircleHelp, ClipboardCheck,
-  FileKey2, Fingerprint, LayoutDashboard, LockKeyhole, Menu, Moon, RefreshCw, Search,
+  Activity, AlertTriangle, Bot, Check, CircleHelp, ClipboardCheck,
+  FileKey2, Fingerprint, LayoutDashboard, LockKeyhole, LogOut, Menu, Moon, RefreshCw, Search,
   Shield, ShieldCheck, Sparkles, Sun, X,
 } from 'lucide-react';
+import type { Session } from '@supabase/supabase-js';
+import { developmentDemoEnabled, getAccessToken, supabaseAuthClient } from './auth-client';
 
-const ACTOR_ID = 'demo-actor';
 type Theme = 'light' | 'dark';
 
 function getInitialTheme(): Theme {
@@ -23,8 +24,10 @@ type View = 'Security Overview' | 'Consent Management' | 'Protected Files' | 'Au
 type Consent = { actorId: string; scope: string; status: string; event: ConsentEvent | null };
 type ConsentEvent = { id: string; event_type: string; occurred_at: string; expires_at: string | null };
 type ProtectedFile = { id: string; actor_id: string; name: string; size: number; sha256: string; content_type: string; permissions: string[]; created_at: string };
+type RiskAnalysis = { model: string; riskScore: number; riskLevel: 'Low' | 'Medium' | 'High' | 'Critical'; threatCategory: string; explanation: string; recommendedAction: string };
 type Approval = { id: string; actor_id: string; file_id: string; status: string; expires_at: string; created_at: string };
-type ApiHealth = { status?: string; storage?: string; database?: { configured: boolean; available: boolean }; gateway?: { ready: boolean; consistent: boolean; ageMs: number | null; error: string | null }; audit?: { ready: boolean; consistent: boolean; error: string | null } };
+type ApiHealth = { status?: string; storage?: string; database?: { configured: boolean; available: boolean }; ai?: { available: boolean; provider: string; model: string | null; configurationError: string | null }; gateway?: { ready: boolean; consistent: boolean; ageMs: number | null; error: string | null }; audit?: { ready: boolean; consistent: boolean; error: string | null } };
+type GeminiStatus = { available: boolean; configurationError: string | null };
 type DataSource = 'health' | 'consents' | 'files' | 'approvals' | 'approvalStatus' | 'ai';
 type DataLoadState = 'loading' | 'available' | 'denied' | 'unavailable';
 type DataLoadStates = Record<DataSource, DataLoadState>;
@@ -57,12 +60,17 @@ const pages: Array<{ name: View; icon: typeof Shield }> = [
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
+    const accessToken = await getAccessToken();
     response = await fetch(path, {
       ...options,
-      headers: { ...(options?.body ? { 'content-type': 'application/json' } : {}), ...options?.headers },
+      headers: {
+        ...(options?.body ? { 'content-type': 'application/json' } : {}),
+        ...options?.headers,
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
+      },
     });
   } catch {
-    throw new Error('Cannot reach the API. Start the backend with "npm run dev:backend" and retry.');
+    throw new Error('Cannot reach the same-origin API. Check that the application server is available, or start both services with "npm run dev" for local development.');
   }
 
   let body: unknown;
@@ -77,12 +85,17 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   if (!response.ok) {
     if (typeof body === 'object' && body !== null) {
       const errorMessage = 'error' in body && typeof body.error === 'string' ? body.error : undefined;
+      const retryAfter = 'retryAfterSeconds' in body && typeof body.retryAfterSeconds === 'number'
+        ? body.retryAfterSeconds
+        : undefined;
       const denialReason = 'reason' in body && typeof body.reason === 'string' ? body.reason : undefined;
       const scope = 'scope' in body && typeof body.scope === 'string' ? body.scope : undefined;
       const actorId = 'actorId' in body && typeof body.actorId === 'string' ? body.actorId : undefined;
       const message = response.status === 403 && denialReason === 'consent_missing' && scope
         ? `Consent required: ${scope} for ${actorId ?? 'this actor'}. Grant this scope in Consent Management, then retry.`
-        : errorMessage ?? (denialReason ? `Access denied: ${denialReason}` : `API request failed (HTTP ${response.status}).`);
+        : response.status === 429 && retryAfter
+          ? `${errorMessage ?? 'Too many requests.'} Retry in ${retryAfter} seconds.`
+          : errorMessage ?? (denialReason ? `Access denied: ${denialReason}` : `API request failed (HTTP ${response.status}).`);
       throw new ApiResponseError(message, response.status, body);
     }
     throw new ApiResponseError(`API request failed (HTTP ${response.status}).`, response.status, body);
@@ -92,6 +105,14 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 
 function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [authReady, setAuthReady] = useState(false);
+  const [session, setSession] = useState<Session | null>(null);
+  const [userRole, setUserRole] = useState<'user' | 'admin' | null>(null);
+  const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up'>('sign-in');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const [view, setView] = useState<View>('Security Overview');
   const [health, setHealth] = useState<ApiHealth | null>(null);
   const [consents, setConsents] = useState<Consent[]>([]);
@@ -99,8 +120,9 @@ function App() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [dataLoadStates, setDataLoadStates] = useState<DataLoadStates>(initialDataLoadStates);
   const [dataLoadErrors, setDataLoadErrors] = useState<Partial<Record<DataSource, string>>>({});
-  const [approvalStatus, setApprovalStatus] = useState<{ available: boolean; deliveryChannel: string | null; otpConfigured: boolean } | null>(null);
+  const [approvalStatus, setApprovalStatus] = useState<{ available: boolean; deliveryChannel: string | null; otpConfigured: boolean; configurationError: string | null } | null>(null);
   const [geminiAvailable, setGeminiAvailable] = useState(false);
+  const [geminiConfigurationError, setGeminiConfigurationError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -111,13 +133,61 @@ function App() {
   const [file, setFile] = useState<File | null>(null);
   const [filePermissions, setFilePermissions] = useState({ read: true, export: false });
   const [analysisText, setAnalysisText] = useState('');
-  const [analysis, setAnalysis] = useState('');
+  const [analysis, setAnalysis] = useState<RiskAnalysis | null>(null);
   const [auditResult, setAuditResult] = useState<AuditCheck | null>(null);
   const [otp, setOtp] = useState('');
+  const actorId = session?.user.id ?? (developmentDemoEnabled ? 'demo-actor' : '');
+  const activeActorId = useRef(actorId);
+  activeActorId.current = actorId;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    if (!supabaseAuthClient) {
+      setAuthReady(true);
+      return;
+    }
+    let active = true;
+    void supabaseAuthClient.auth.getSession().then(({ data, error: sessionError }) => {
+      if (!active) return;
+      if (sessionError) setAuthError('Could not restore your sign-in session. Please sign in again.');
+      setSession(data.session);
+      setAuthReady(true);
+    });
+    const { data: { subscription } } = supabaseAuthClient.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setUserRole(null);
+      setAuthReady(true);
+    });
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setUserRole(developmentDemoEnabled ? 'user' : null);
+      return;
+    }
+    let active = true;
+    void api<{ role: 'user' | 'admin' }>('/api/auth/me')
+      .then(({ role }) => { if (active) setUserRole(role); })
+      .catch(() => { if (active) setUserRole('user'); });
+    return () => { active = false; };
+  }, [session?.access_token]);
+
+  useEffect(() => {
+    setConsents([]);
+    setFiles([]);
+    setApprovals([]);
+    setDataLoadStates(initialDataLoadStates);
+    setDataLoadErrors({});
+    setAnalysis(null);
+    setAuditResult(null);
+  }, [actorId]);
 
   const toggleTheme = () => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
@@ -131,22 +201,28 @@ function App() {
   };
 
   const refresh = useCallback(async () => {
+    if (!actorId) return;
+    const requestedActorId = actorId;
     setRefreshing(true);
     try {
       const [healthResult, consentResult, fileResult, approvalResult, approvalInfo, aiInfo] = await Promise.allSettled([
         api<ApiHealth>('/api/health'),
-        api<{ consents: Consent[] }>(`/api/consents?actorId=${ACTOR_ID}`),
-        api<{ files: ProtectedFile[] }>(`/api/files?actorId=${ACTOR_ID}`),
-        api<{ requests: Approval[] }>(`/api/approvals?actorId=${ACTOR_ID}`),
-        api<{ available: boolean; deliveryChannel: string | null; otpConfigured: boolean }>('/api/approvals/status'),
-        api<{ available: boolean }>('/api/ai/status'),
+        api<{ consents: Consent[] }>('/api/consents'),
+        api<{ files: ProtectedFile[] }>('/api/files'),
+        api<{ requests: Approval[] }>('/api/approvals'),
+        api<{ available: boolean; deliveryChannel: string | null; otpConfigured: boolean; configurationError: string | null }>('/api/approvals/status'),
+        api<GeminiStatus>('/api/ai/status'),
       ]);
+      if (activeActorId.current !== requestedActorId) return;
       if (healthResult.status === 'fulfilled') setHealth(healthResult.value);
       if (consentResult.status === 'fulfilled') setConsents(consentResult.value.consents);
       if (fileResult.status === 'fulfilled') setFiles(fileResult.value.files);
       if (approvalResult.status === 'fulfilled') setApprovals(approvalResult.value.requests);
       if (approvalInfo.status === 'fulfilled') setApprovalStatus(approvalInfo.value);
-      if (aiInfo.status === 'fulfilled') setGeminiAvailable(aiInfo.value.available);
+      if (aiInfo.status === 'fulfilled') {
+        setGeminiAvailable(aiInfo.value.available);
+        setGeminiConfigurationError(aiInfo.value.configurationError);
+      }
 
       const results = { health: healthResult, consents: consentResult, files: fileResult, approvals: approvalResult, approvalStatus: approvalInfo, ai: aiInfo };
       const nextStates = {} as DataLoadStates;
@@ -166,13 +242,14 @@ function App() {
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [actorId]);
 
   useEffect(() => {
+    if (!authReady || !actorId) return;
     void refresh();
     const timer = window.setInterval(() => void refresh(), 15000);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [authReady, actorId, refresh]);
 
   const perform = async (action: () => Promise<void>, success: string) => {
     setBusy(true); setError(''); setNotice('');
@@ -183,7 +260,7 @@ function App() {
 
   const addConsent = () => perform(async () => {
     const expiresAt = expiry ? new Date(expiry).toISOString() : null;
-    await api('/api/consents', { method: 'POST', body: JSON.stringify({ actorId: ACTOR_ID, scope, expiresAt }) });
+    await api('/api/consents', { method: 'POST', body: JSON.stringify({ scope, expiresAt }) });
   }, `Consent granted for ${scope}.`);
 
   const revokeConsent = (subject: Consent) => perform(async () => {
@@ -199,7 +276,7 @@ function App() {
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
     const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
     await api('/api/files', { method: 'POST', body: JSON.stringify({
-      actorId: ACTOR_ID, name: file.name, size: file.size, sha256,
+      name: file.name, size: file.size, sha256,
       contentType: file.type || 'application/octet-stream',
       permissions: Object.entries(filePermissions).filter(([, enabled]) => enabled).map(([permission]) => permission),
     }) });
@@ -211,7 +288,7 @@ function App() {
   const verifyAudit = () => perform(async () => {
     try {
       const result = await api<AuditCheck>('/api/audit/verify', {
-        method: 'POST', body: JSON.stringify({ actorId: ACTOR_ID }),
+        method: 'POST', body: JSON.stringify({}),
       });
       setAuditResult(result);
     } catch (reason) {
@@ -228,16 +305,21 @@ function App() {
     }
   }, 'Audit verification completed. Review the result below.');
 
-  const analyzeRisk = () => perform(async () => {
-    const result = await api<{ analysis: string }>('/api/ai/analyze', {
-      method: 'POST', body: JSON.stringify({ actorId: ACTOR_ID, operation: analysisText }),
-    });
-    setAnalysis(result.analysis);
-  }, 'Gemini risk analysis completed.');
+  const analyzeRisk = () => {
+    setAnalysis(null);
+    return perform(async () => {
+      const result = await api<RiskAnalysis>('/api/ai/analyze', {
+        method: 'POST', body: JSON.stringify({ operation: analysisText }),
+      });
+      setAnalysis(result);
+    }, 'Gemini risk analysis completed.');
+  };
 
   const requestExport = (fileId: string) => perform(async () => {
-    await api('/api/approvals/payment-export', { method: 'POST', body: JSON.stringify({ actorId: ACTOR_ID, fileId }) });
-  }, 'Approval request sent through the configured administrator channel.');
+    await api('/api/approvals/payment-export', { method: 'POST', body: JSON.stringify({ fileId }) });
+  }, approvalStatus?.deliveryChannel === 'development'
+    ? 'Approval request created. The OTP is available only in the backend development terminal.'
+    : 'Approval request sent through the configured administrator channel.');
 
   const approveRequest = (approvalId: string) => perform(async () => {
     if (!otp) throw new Error('Enter the administrator OTP delivered through the configured channel.');
@@ -246,8 +328,53 @@ function App() {
   }, 'Administrator approval recorded.');
 
   const releaseExport = (approvalId: string) => perform(async () => {
-    await api(`/api/approvals/${approvalId}/release`, { method: 'POST', body: JSON.stringify({ actorId: ACTOR_ID }) });
+    await api(`/api/approvals/${approvalId}/release`, { method: 'POST', body: JSON.stringify({}) });
   }, 'Approved metadata export released.');
+
+  const submitAuthentication = async (event: FormEvent) => {
+    event.preventDefault();
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      if (!supabaseAuthClient) throw new Error('Supabase Auth is not configured for this frontend.');
+      const path = authMode === 'sign-in' ? '/api/auth/sign-in' : '/api/auth/sign-up';
+      const result = await api<{ session?: { accessToken: string; refreshToken: string }; needsEmailConfirmation?: boolean }>(path, {
+        method: 'POST',
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      if (result.needsEmailConfirmation) {
+        setAuthError('Check your email to confirm the new account, then sign in.');
+        return;
+      }
+      if (!result.session) throw new Error('Authentication did not return a session. Please try again.');
+      const { error: sessionError } = await supabaseAuthClient.auth.setSession({
+        access_token: result.session.accessToken,
+        refresh_token: result.session.refreshToken,
+      });
+      if (sessionError) throw new Error('Could not start the authenticated session. Please sign in again.');
+      setAuthPassword('');
+    } catch (reason) {
+      setAuthError(reason instanceof Error ? reason.message : 'Authentication failed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    if (supabaseAuthClient) {
+      const { error: signOutError } = await supabaseAuthClient.auth.signOut();
+      if (signOutError) {
+        setError('The server could not revoke the Supabase session. Retry sign-out before leaving this device.');
+        return;
+      }
+    }
+    setSession(null);
+    setUserRole(null);
+    setConsents([]);
+    setFiles([]);
+    setApprovals([]);
+    setView('Security Overview');
+  };
 
   const activeConsents = consents.filter((consent) => consent.status === 'granted').length;
   const apiUp = health?.status === 'ok';
@@ -269,17 +396,30 @@ function App() {
   };
   const unavailableSources = viewSources[view].filter((source) => dataLoadStates[source] === 'unavailable' || dataLoadStates[source] === 'denied');
 
+  if (!authReady) return <AuthScreen loading />;
+  if (!actorId) return <AuthScreen
+    mode={authMode}
+    email={authEmail}
+    password={authPassword}
+    error={authError}
+    busy={authBusy}
+    setMode={setAuthMode}
+    setEmail={setAuthEmail}
+    setPassword={setAuthPassword}
+    onSubmit={submitAuthentication}
+  />;
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNavOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-lockup"><div className="brand-mark"><Shield size={20} /></div><div className="brand-name">cyber<span>sentinel</span><small>AI SECURITY PLATFORM</small></div><button className="icon-button mobile-close" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}><X size={18} /></button></div>
         <div className="workspace-label">WORKSPACE</div>
-        <div className="workspace-switcher"><span className="workspace-avatar">D</span><span className="workspace-copy"><strong>Local demo identity</strong><small>{ACTOR_ID}</small></span><ChevronDown size={15} /></div>
+        <div className="workspace-switcher"><span className="workspace-avatar">{(session?.user.email ?? 'D').slice(0, 1).toUpperCase()}</span><span className="workspace-copy"><strong>{session?.user.email ?? 'Local demo identity'}</strong><small>{userRole === 'admin' ? 'Administrator' : actorId}</small></span></div>
         <div className="nav-caption">SECURITY OPERATIONS</div>
         <nav className="primary-nav" aria-label="Main navigation">
-          {pages.map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${view === name ? 'nav-active' : ''}`} aria-current={view === name ? 'page' : undefined} onClick={() => { setView(name); setMobileNavOpen(false); setError(''); setNotice(''); }}><Icon size={17} /><span>{name}</span></button>)}
+          {pages.filter((page) => page.name !== 'Administrator Approvals' || userRole === 'admin').map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${view === name ? 'nav-active' : ''}`} aria-current={view === name ? 'page' : undefined} onClick={() => { setView(name); setMobileNavOpen(false); setError(''); setNotice(''); }}><Icon size={17} /><span>{name}</span></button>)}
         </nav>
-        <div className="sidebar-bottom"><div className="sidebar-help"><CircleHelp size={16} /><span>Security status</span><span className={`side-health ${apiUp ? 'online' : ''}`} /></div><div className="user-profile"><div className="user-avatar">D</div><div className="user-copy"><strong>Development mode</strong><small>{health?.storage ?? 'Checking storage...'}</small></div><button className="icon-button profile-menu" aria-label="Refresh data" onClick={() => void refresh()}><RefreshCw size={16} /></button></div></div>
+        <div className="sidebar-bottom"><div className="sidebar-help"><CircleHelp size={16} /><span>Security status</span><span className={`side-health ${apiUp ? 'online' : ''}`} /></div><div className="user-profile"><div className="user-avatar">{userRole === 'admin' ? 'A' : 'U'}</div><div className="user-copy"><strong>{session ? (userRole === 'admin' ? 'Administrator' : 'Authenticated user') : 'Development mode'}</strong><small>{health?.storage ?? 'Checking storage...'}</small></div>{session && <button className="icon-button profile-menu" aria-label="Sign out" onClick={() => void signOut()}><LogOut size={16} /></button>}</div></div>
       </aside>
       {mobileNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
 
@@ -295,10 +435,10 @@ function App() {
 
           {view === 'Security Overview' && <Overview health={health} geminiAvailable={geminiAvailable} aiState={dataLoadStates.ai} activeConsents={activeConsents} fileCount={files.length} pendingApprovals={approvals.filter((approval) => approval.status === 'pending').length} consentState={dataLoadStates.consents} filesState={dataLoadStates.files} approvalsState={dataLoadStates.approvals} healthState={dataLoadStates.health} onNavigate={setView} />}
           {view === 'Consent Management' && <ConsentPage consents={consents} loadStatus={dataLoadStates.consents} scope={scope} setScope={setScope} expiry={expiry} setExpiry={setExpiry} onGrant={addConsent} onRevoke={revokeConsent} onExpire={expireConsent} busy={busy} />}
-          {view === 'Protected Files' && <FilesPage files={files} loadStatus={dataLoadStates.files} file={file} setFile={setFile} permissions={filePermissions} setPermissions={setFilePermissions} onRegister={registerFile} busy={busy} onRequestExport={requestExport} onAccess={(fileId) => perform(async () => { await api(`/api/files/${fileId}/access`, { method: 'POST', body: JSON.stringify({ actorId: ACTOR_ID }) }); }, 'Gateway allowed metadata access and recorded the decision.')} />}
+          {view === 'Protected Files' && <FilesPage files={files} loadStatus={dataLoadStates.files} file={file} setFile={setFile} permissions={filePermissions} setPermissions={setFilePermissions} onRegister={registerFile} busy={busy} onRequestExport={requestExport} onAccess={(fileId) => perform(async () => { await api(`/api/files/${fileId}/access`, { method: 'POST', body: JSON.stringify({}) }); }, 'Gateway allowed metadata access and recorded the decision.')} />}
           {view === 'Audit Logs' && <AuditPage audit={health?.audit} verification={auditResult} onVerify={verifyAudit} busy={busy} />}
-          {view === 'AI Risk Analysis' && <AiPage available={geminiAvailable} loadStatus={dataLoadStates.ai} text={analysisText} setText={setAnalysisText} result={analysis} onAnalyze={analyzeRisk} busy={busy} />}
-          {view === 'Administrator Approvals' && <ApprovalsPage requests={approvals} loadStatus={dataLoadStates.approvals} statusLoadStatus={dataLoadStates.approvalStatus} status={approvalStatus} otp={otp} setOtp={setOtp} onApprove={approveRequest} onRelease={releaseExport} busy={busy} />}
+          {view === 'AI Risk Analysis' && <AiPage available={geminiAvailable} configurationError={geminiConfigurationError} loadStatus={dataLoadStates.ai} text={analysisText} setText={setAnalysisText} result={analysis} onAnalyze={analyzeRisk} busy={busy} />}
+          {view === 'Administrator Approvals' && userRole === 'admin' && <ApprovalsPage requests={approvals} loadStatus={dataLoadStates.approvals} statusLoadStatus={dataLoadStates.approvalStatus} status={approvalStatus} otp={otp} setOtp={setOtp} onApprove={approveRequest} onRelease={releaseExport} busy={busy} />}
 
           <footer className="page-footer"><span><span className="footer-mark">C</span> CYBERSENTINEL AI <i /> {health?.storage?.toUpperCase() ?? 'STORAGE UNAVAILABLE'}</span><span>STAGE 6 <i /> <span className="footer-health"><b className={apiUp ? 'online' : 'offline'} /> {apiUp ? 'API ONLINE' : 'API OFFLINE'}</span></span></footer>
         </div>
@@ -315,7 +455,7 @@ function Overview({ health, geminiAvailable, aiState, activeConsents, fileCount,
     <section className="hero-panel app-hero"><div className="hero-grid" /><div className="hero-copy"><div className="hero-overline"><span className="live-pip" /> SECURITY POSTURE</div><h2>Protection starts<br />with <em>verified consent.</em></h2><p>Live status from the backend policy projection, audit chain, and configured integrations.</p><button className="hero-link" onClick={() => onNavigate('Consent Management')}>Manage consent <ShieldCheck size={15} /></button></div><div className="hero-art" aria-hidden="true"><div className="orbit orbit-outer" /><div className="orbit orbit-inner" /><div className="hero-core"><ShieldCheck size={34} /></div><div className="orbit-node node-top"><Activity size={14} /></div><div className="orbit-node node-right"><Fingerprint size={14} /></div><div className="orbit-node node-left"><LockKeyhole size={14} /></div><div className="orbit-node node-bottom"><Bot size={14} /></div></div><div className="hero-index">LIVE <span>/ STATUS</span></div></section>
     <section className="metrics-grid app-metrics"><Metric label="ACTIVE CONSENTS" value={consentState === 'available' ? String(activeConsents) : loadStateLabel(consentState)} note="Current replayed grants" icon={<Fingerprint size={16} />} /><Metric label="REGISTERED FILES" value={filesState === 'available' ? String(fileCount) : loadStateLabel(filesState)} note="Metadata records · not endpoint protection" icon={<FileKey2 size={16} />} /><Metric label="PENDING APPROVALS" value={approvalsState === 'available' ? String(pendingApprovals) : loadStateLabel(approvalsState)} note="Awaiting admin action" icon={<ClipboardCheck size={16} />} /><Metric label="GATEWAY" value={gatewayLabel} note={healthState !== 'available' ? 'Health endpoint unavailable' : health?.gateway?.ageMs === null || health?.gateway?.ageMs === undefined ? 'Projection initializing' : `Synced ${Math.round(health.gateway.ageMs / 1000)}s ago`} icon={<ShieldCheck size={16} />} />
     </section>
-    <section className="lower-grid app-lower"><article className="activity-panel"><div className="section-heading"><div><div className="section-kicker">SYSTEM READINESS</div><h3>Verified service status</h3></div><span className="stage-tag">LIVE</span></div><div className="signal-list"><Signal name="Consent projection" detail={healthState !== 'available' ? 'Unavailable · health endpoint not reached' : health?.gateway?.error ?? (gatewayReady ? `Ready · ${health?.storage ?? 'storage unavailable'}` : 'Unavailable or stale · protected access denied')} active={healthState === 'available' && gatewayReady} /><Signal name="Audit chain" detail={healthState !== 'available' ? 'Unavailable · health endpoint not reached' : health?.audit?.error ?? (auditReady ? 'Initialized · SHA-256 chain verified at startup' : 'Not verified · audit actions fail closed')} active={healthState === 'available' && auditReady} /><Signal name="Database" detail={healthState !== 'available' ? 'Unavailable · health endpoint not reached' : health?.database?.configured === false ? 'Database not configured · using temporary in-memory storage' : health?.database?.available ? 'Supabase connected · recent consent read verified' : 'Supabase configured but unavailable or not verified'} active={healthState === 'available' && health?.database?.available === true} /></div></article><article className="assistant-panel"><div className="assistant-top"><div className="assistant-icon"><Sparkles size={17} /></div><span>AI RISK ANALYSIS</span><span className="assistant-lock">{aiState === 'unavailable' ? 'UNAVAILABLE' : aiState === 'loading' ? 'CHECKING' : geminiAvailable ? 'READY' : 'NOT CONFIGURED'}</span></div><div className="assistant-body"><h3>{aiState === 'unavailable' ? 'Gemini status unavailable.' : aiState === 'loading' ? 'Checking Gemini status.' : geminiAvailable ? 'Gemini is ready.' : 'Configure Gemini.'}</h3><p>{aiState === 'unavailable' ? 'The API did not return AI integration status.' : aiState === 'loading' ? 'Waiting for the backend integration status.' : geminiAvailable ? 'Risk analysis is available through the server-side integration.' : 'Set GEMINI_API_KEY on the backend. No generated analysis will be fabricated.'}</p></div><button className="assistant-cta" onClick={() => onNavigate('AI Risk Analysis')}>Open AI analysis <Bot size={14} /></button><div className="assistant-lines" aria-hidden="true"><span /><span /><span /><span /><span /></div></article></section>
+    <section className="lower-grid app-lower"><article className="activity-panel"><div className="section-heading"><div><div className="section-kicker">SYSTEM READINESS</div><h3>Verified service status</h3></div><span className="stage-tag">LIVE</span></div><div className="signal-list"><Signal name="Consent projection" detail={healthState !== 'available' ? 'Unavailable · health endpoint not reached' : health?.gateway?.error ?? (gatewayReady ? `Ready · ${health?.storage ?? 'storage unavailable'}` : 'Unavailable or stale · protected access denied')} active={healthState === 'available' && gatewayReady} /><Signal name="Audit chain" detail={healthState !== 'available' ? 'Unavailable · health endpoint not reached' : health?.audit?.error ?? (auditReady ? 'Initialized · SHA-256 chain verified at startup' : 'Not verified · audit actions fail closed')} active={healthState === 'available' && auditReady} /><Signal name="Database" detail={healthState !== 'available' ? 'Unavailable · health endpoint not reached' : health?.database?.configured === false ? 'Database not configured · using temporary in-memory storage' : health?.database?.available ? 'Supabase connected · recent consent read verified' : 'Supabase configured but unavailable or not verified'} active={healthState === 'available' && health?.database?.available === true} /></div></article><article className="assistant-panel"><div className="assistant-top"><div className="assistant-icon"><Sparkles size={17} /></div><span>AI RISK ANALYSIS</span><span className="assistant-lock">{aiState === 'unavailable' ? 'UNAVAILABLE' : aiState === 'loading' ? 'CHECKING' : geminiAvailable ? 'CONFIGURED' : 'NOT CONFIGURED'}</span></div><div className="assistant-body"><h3>{aiState === 'unavailable' ? 'Gemini status unavailable.' : aiState === 'loading' ? 'Checking Gemini status.' : geminiAvailable ? 'Gemini key is configured.' : 'Configure Gemini.'}</h3><p>{aiState === 'unavailable' ? 'The API did not return AI integration status.' : aiState === 'loading' ? 'Waiting for the backend integration status.' : geminiAvailable ? 'Provider access is checked when you submit an analysis.' : 'Set GEMINI_API_KEY on the backend. No generated analysis will be fabricated.'}</p></div><button className="assistant-cta" onClick={() => onNavigate('AI Risk Analysis')}>Open AI analysis <Bot size={14} /></button><div className="assistant-lines" aria-hidden="true"><span /><span /><span /><span /><span /></div></article></section>
   </>;
 }
 
@@ -332,6 +472,38 @@ function isAuditCheck(value: unknown): value is AuditCheck {
     result.storageAvailable === true &&
     Number.isInteger(result.eventCount) &&
     (result.error === null || typeof result.error === 'string');
+}
+
+function AuthScreen({ loading, mode, email, password, error, busy, setMode, setEmail, setPassword, onSubmit }: {
+  loading?: boolean;
+  mode?: 'sign-in' | 'sign-up';
+  email?: string;
+  password?: string;
+  error?: string;
+  busy?: boolean;
+  setMode?: (mode: 'sign-in' | 'sign-up') => void;
+  setEmail?: (value: string) => void;
+  setPassword?: (value: string) => void;
+  onSubmit?: (event: FormEvent) => void;
+}) {
+  return <main className="auth-shell">
+    <section className="auth-panel">
+      <div className="brand-lockup auth-brand"><div className="brand-mark"><Shield size={20} /></div><div className="brand-name">cyber<span>sentinel</span><small>AI SECURITY PLATFORM</small></div></div>
+      <div className="section-kicker">SECURE WORKSPACE</div>
+      <h1>{loading ? 'Restoring session' : mode === 'sign-up' ? 'Create your account' : 'Sign in to continue'}</h1>
+      <p className="page-subtitle">{loading ? 'Checking your authenticated session…' : 'Your identity is verified by Supabase Auth before protected data or actions are available.'}</p>
+      {!loading && <form className="auth-form" onSubmit={onSubmit}>
+        <label>Email<input type="email" autoComplete="email" value={email ?? ''} onChange={(event) => setEmail?.(event.target.value)} required maxLength={320} /></label>
+        <label>Password<input type="password" autoComplete={mode === 'sign-up' ? 'new-password' : 'current-password'} value={password ?? ''} onChange={(event) => setPassword?.(event.target.value)} required minLength={mode === 'sign-up' ? 12 : 1} maxLength={1024} /></label>
+        {error && <div className="notice notice-error" role="alert">{error}</div>}
+        {!supabaseAuthClient && <div className="notice notice-warning" role="status">Configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable Supabase Auth.</div>}
+        <button className="primary-button" type="submit" disabled={busy || !supabaseAuthClient}>{busy ? 'Please wait…' : mode === 'sign-up' ? 'Create account' : 'Sign in'}</button>
+      </form>}
+      {!loading && <button className="text-button auth-mode-toggle" type="button" onClick={() => { setMode?.(mode === 'sign-up' ? 'sign-in' : 'sign-up'); }}>
+        {mode === 'sign-up' ? 'Already have an account? Sign in' : 'New here? Create an account'}
+      </button>}
+    </section>
+  </main>;
 }
 
 function Metric({ label, value, note, icon }: { label: string; value: string; note: string; icon: ReactNode }) { return <article className="metric-card"><div className="metric-top"><span>{label}</span>{icon}</div><div className={`metric-value ${value.length > 10 ? 'metric-text' : ''}`}>{value}</div><div className="metric-foot"><span className="metric-note">{note}</span></div></article>; }
@@ -365,12 +537,23 @@ function FilesPage({ files, loadStatus, file, setFile, permissions, setPermissio
   const loadHistory = async (fileId: string) => {
     setHistoryFileId(fileId);
     setHistoryError('');
-    try { const result = await api<{ events: typeof history }>(`/api/files/${encodeURIComponent(fileId)}/history?actorId=${ACTOR_ID}`); setHistory(result.events); }
+    try { const result = await api<{ events: typeof history }>(`/api/files/${encodeURIComponent(fileId)}/history`); setHistory(result.events); }
     catch (reason) { setHistory([]); setHistoryError(reason instanceof Error ? reason.message : 'File history is unavailable.'); }
   };
   return <>
-    <div className="notice notice-warning"><AlertTriangle size={18} /><span><strong>Browser metadata protection only.</strong> The app fingerprints the selected file in your browser and stores metadata, not file contents. This cannot prevent other desktop applications from opening or copying local files. No contents are sent to Gemini.</span></div>
-    <section className="form-panel"><div className="section-heading"><div><div className="section-kicker">LOCAL FINGERPRINT</div><h3>Register file metadata</h3></div><span className="stage-tag">SHA-256</span></div><div className="file-form"><label className="file-picker"><FileKey2 size={18} /><span>{file ? file.name : 'Choose a file from this device'}</span><input id="protected-file-picker" type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label><div className="permission-checks"><label><input type="checkbox" checked={permissions.read} onChange={(event) => setPermissions({ ...permissions, read: event.target.checked })} /> Allow read</label><label><input type="checkbox" checked={permissions.export} onChange={(event) => setPermissions({ ...permissions, export: event.target.checked })} /> Allow approved metadata export</label></div><button className="primary-button" disabled={!file || busy} onClick={onRegister}>Fingerprint & register metadata</button></div></section>
+    <aside className="protection-scope" aria-labelledby="protection-scope-title">
+      <div className="protection-scope-icon"><ShieldCheck size={16} /></div>
+      <div className="protection-scope-content">
+        <h2 className="protection-scope-title" id="protection-scope-title">Protection Scope</h2>
+        <div className="protection-scope-facts">
+          <p><strong>Calculated locally</strong>SHA-256 fingerprint is calculated in your browser.</p>
+          <p><strong>Stored</strong>File metadata and fingerprint only.</p>
+          <p><strong>Not stored or sent</strong>File contents are not stored or uploaded, including to Gemini.</p>
+        </div>
+        <p className="protection-scope-limit">These browser-based metadata controls are not operating-system-level protection and cannot prevent other desktop applications from opening or copying local files.</p>
+      </div>
+    </aside>
+    <section className="form-panel"><div className="section-heading"><div><div className="section-kicker">Local File Fingerprint</div><h3>Register file metadata</h3></div><span className="stage-tag">SHA-256</span></div><div className="file-form"><label className="file-picker"><FileKey2 size={18} /><span>{file ? file.name : 'Choose a file from this device'}</span><input id="protected-file-picker" type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label><div className="permission-checks"><label><input type="checkbox" checked={permissions.read} onChange={(event) => setPermissions({ ...permissions, read: event.target.checked })} /> Allow read</label><label><input type="checkbox" checked={permissions.export} onChange={(event) => setPermissions({ ...permissions, export: event.target.checked })} /> Allow approved metadata export</label></div><button className="primary-button" disabled={!file || busy} onClick={onRegister}>Fingerprint & register metadata</button></div></section>
     <DataTable title="Registered files" description="All protected operations are gateway-checked and audited." columns={['File', 'Fingerprint', 'Permissions', 'Registered', 'Actions']} loadStatus={loadStatus} empty={loadStatus === 'denied' ? 'Grant files:read consent to demo-actor in Consent Management to view its registered file metadata.' : loadStatus === 'unavailable' ? 'Protected file metadata is unavailable. Check the API and database status above, then retry.' : loadStatus === 'loading' ? 'Loading protected files…' : files.length === 0 ? 'No file metadata registered.' : undefined}>
       {files.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small className="cell-subtitle">{formatBytes(item.size)} · {item.content_type}</small></td><td><code className="hash-short">{item.sha256}</code></td><td>{item.permissions.join(', ') || 'None'}</td><td>{formatDate(item.created_at)}</td><td className="table-actions"><button className="text-button" onClick={() => onAccess(item.id)}>Check access</button><button className="text-button" onClick={() => void loadHistory(item.id)}>History</button>{item.permissions.includes('export') && <button className="text-button" onClick={() => onRequestExport(item.id)}>Request export</button>}</td></tr>)}
     </DataTable>
@@ -387,7 +570,7 @@ function AuditPage({ audit, verification, onVerify, busy }: { audit: ApiHealth['
   useEffect(() => {
     let active = true;
     setLoadStatus('loading');
-    void api<{ events: typeof events }>('/api/audit?actorId=' + ACTOR_ID)
+    void api<{ events: typeof events }>('/api/audit?limit=100')
       .then((result) => {
         if (!active) return;
         setEvents(result.events);
@@ -422,23 +605,23 @@ function AuditPage({ audit, verification, onVerify, busy }: { audit: ApiHealth['
   </>;
 }
 
-function AiPage({ available, loadStatus, text, setText, result, onAnalyze, busy }: { available: boolean; loadStatus: DataLoadState; text: string; setText: (value: string) => void; result: string; onAnalyze: () => void; busy: boolean }) {
+function AiPage({ available, configurationError, loadStatus, text, setText, result, onAnalyze, busy }: { available: boolean; configurationError: string | null; loadStatus: DataLoadState; text: string; setText: (value: string) => void; result: RiskAnalysis | null; onAnalyze: () => void; busy: boolean }) {
   const description = loadStatus === 'unavailable'
     ? 'AI integration status is unavailable. Retry after restoring the API connection.'
     : loadStatus === 'loading'
       ? 'Checking whether the server-side Gemini integration is configured.'
       : available
-        ? 'Risk analysis is advisory; backend authorization remains authoritative.'
-        : 'Set GEMINI_API_KEY in the backend environment and restart the API. No placeholder analysis will be shown.';
+        ? 'The key is configured server-side; Gemini access is checked when you analyze. Results are advisory, and backend authorization remains authoritative.'
+        : `${configurationError ?? 'Set GEMINI_API_KEY in the backend environment and restart the API.'} No placeholder analysis will be shown.`;
   const title = loadStatus === 'loading' ? 'Checking Gemini configuration.' : loadStatus === 'unavailable' ? 'Gemini status unavailable.' : available ? 'Gemini is configured server-side.' : 'Gemini API key not configured.';
   return <>
     <div className={`notice ${loadStatus === 'available' && available ? 'notice-ok' : 'notice-warning'}`}><Sparkles size={18} /><span><strong>{title}</strong> {description}</span></div>
     <section className="form-panel ai-form"><div className="section-heading"><div><div className="section-kicker">OPERATION RISK</div><h3>Describe a suspicious operation</h3></div><span className="stage-tag">ADVISORY ONLY</span></div><label className="full-label">Operation description<textarea value={text} onChange={(event) => setText(event.target.value)} maxLength={2000} placeholder="Describe the operation to assess. Do not paste personal data, secrets, or file contents." rows={5} /></label><div className="form-bottom"><span>{text.length}/2000 · Text is sent to Gemini only when you submit this form.</span><button className="primary-button" disabled={loadStatus !== 'available' || !available || busy || text.trim().length < 5} onClick={onAnalyze}><Sparkles size={15} /> Analyze risk</button></div></section>
-    {result && <section className="analysis-result"><div className="result-title"><Sparkles size={17} /><strong>Gemini analysis</strong><span>Advisory · backend policies remain authoritative</span></div><p>{result}</p></section>}
+    {result && <section className="analysis-result"><div className="result-title"><Sparkles size={17} /><strong>Gemini analysis</strong><span>Advisory · {result.model}</span></div><div className="analysis-summary"><div className={`analysis-score risk-${result.riskLevel.toLowerCase()}`}><strong>{result.riskScore}</strong><span>/ 100</span></div><div className="analysis-classification"><span>RISK LEVEL</span><strong className={`risk-text-${result.riskLevel.toLowerCase()}`}>{result.riskLevel}</strong></div><div className="analysis-classification"><span>THREAT CATEGORY</span><strong>{result.threatCategory}</strong></div></div><div className="analysis-detail"><h4>Suspicious indicators</h4><p>{result.explanation}</p></div><div className="analysis-recommendation"><h4>Recommended safety action</h4><p>{result.recommendedAction}</p></div></section>}
   </>;
 }
 
-function ApprovalsPage({ requests, loadStatus, statusLoadStatus, status, otp, setOtp, onApprove, onRelease, busy }: { requests: Approval[]; loadStatus: DataLoadState; statusLoadStatus: DataLoadState; status: { available: boolean; deliveryChannel: string | null; otpConfigured: boolean } | null; otp: string; setOtp: (value: string) => void; onApprove: (id: string) => void; onRelease: (id: string) => void; busy: boolean }) {
+function ApprovalsPage({ requests, loadStatus, statusLoadStatus, status, otp, setOtp, onApprove, onRelease, busy }: { requests: Approval[]; loadStatus: DataLoadState; statusLoadStatus: DataLoadState; status: { available: boolean; deliveryChannel: string | null; otpConfigured: boolean; configurationError?: string | null } | null; otp: string; setOtp: (value: string) => void; onApprove: (id: string) => void; onRelease: (id: string) => void; busy: boolean }) {
   const serviceAvailable = statusLoadStatus === 'available' && status?.available;
   const statusTitle = statusLoadStatus === 'loading'
     ? 'Checking approval delivery status.'
@@ -452,8 +635,10 @@ function ApprovalsPage({ requests, loadStatus, statusLoadStatus, status, otp, se
     : statusLoadStatus === 'unavailable'
       ? 'The backend did not return approval delivery status.'
     : serviceAvailable
-      ? 'OTP expires after 60 seconds. The code is delivered out-of-band and is never shown here.'
-      : 'Configure OTP_SECRET and a delivery provider in backend environment variables. Exports remain denied.';
+      ? status?.deliveryChannel === 'development'
+        ? 'Development-only terminal delivery is active. The OTP is logged only in the backend development terminal and expires after 60 seconds.'
+        : 'OTP expires after 60 seconds. The code is delivered out-of-band and is never shown here.'
+      : `${status?.configurationError ?? 'Configure OTP_SECRET and a delivery provider in backend environment variables.'} Exports remain denied.`;
   return <>
     <div className={`notice ${serviceAvailable ? 'notice-ok' : 'notice-warning'}`}><LockKeyhole size={18} /><span><strong>{statusTitle}</strong> {statusDetails}</span></div>
     <section className="form-panel"><div className="section-heading"><div><div className="section-kicker">ADMINISTRATOR ACTION</div><h3>Approve a pending metadata export</h3></div><span className="stage-tag">60 SECOND OTP</span></div><div className="form-row approval-form"><label>Delivered OTP<input inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6-digit code" /></label><span className="form-note">Select a request below to submit this code. Only an administrator with access to the configured delivery channel can approve.</span></div></section>

@@ -14,6 +14,7 @@ import { ConsentProjection } from '../src/gateway.js';
 import { createAuditRouter } from '../src/audit-routes.js';
 import { createFileRouter } from '../src/file-routes.js';
 import { ProtectedFileService } from '../src/protected-files.js';
+import { createRateLimitMiddleware } from '../src/rate-limits.js';
 import { MemoryConsentStore } from '../src/storage.js';
 
 const actorId = 'demo-actor';
@@ -48,6 +49,16 @@ describe('authorization route policies', () => {
 
   before(async () => {
     app.use(express.json());
+    app.use(createRateLimitMiddleware(store, 'authorization-route-test-secret-longer-than-32-characters', 'ip'));
+    app.use((request, _response, next) => {
+      request.identity = {
+        id: request.get('x-test-role') === 'admin' ? 'real-admin' : actorId,
+        email: null,
+        role: request.get('x-test-role') === 'admin' ? 'admin' : 'user',
+      };
+      next();
+    });
+    app.use(createRateLimitMiddleware(store, 'authorization-route-test-secret-longer-than-32-characters', 'identity'));
     app.use('/api/consents', createConsentRouter(consent, audit));
     app.use('/api/files', createFileRouter(files, audit, projection));
     app.use('/api/approvals', createApprovalRouter(approvals, files, projection));
@@ -84,6 +95,12 @@ describe('authorization route policies', () => {
     const allowed = await fetch(`${baseUrl}/api/files?actorId=${actorId}`);
     assert.equal(allowed.status, 200);
     assert.deepEqual((await allowed.json() as { files: ProtectedFileRecord[] }).files.map((file) => file.id), [protectedFile.id]);
+
+    const revoked = await fetch(`${baseUrl}/api/consents/${actorId}/files:read/revoke`, { method: 'POST' });
+    assert.equal(revoked.status, 201);
+    const deniedAfterRevocation = await fetch(`${baseUrl}/api/files`);
+    assert.equal(deniedAfterRevocation.status, 403);
+    assert.equal((await deniedAfterRevocation.json() as { reason: string }).reason, 'consent_revoked');
   });
 
   it('requires approvals:read to list only the requesting actor’s approvals', async () => {
@@ -94,20 +111,50 @@ describe('authorization route policies', () => {
       scope: 'approvals:read', reason: 'consent_missing', actorId,
     });
 
-    await consent.grant(actorId, 'approvals:read');
-    await consent.grant(actorId, 'payments:export');
+    const deniedExport = await fetch(`${baseUrl}/api/approvals/payment-export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ actorId, fileId: protectedFile.id }),
+    });
+    assert.equal(deniedExport.status, 403);
+    assert.match((await deniedExport.json() as { error: string }).error, /consent_missing/);
+
+    for (const scope of ['approvals:read', 'payments:export']) {
+      const grant = await fetch(`${baseUrl}/api/consents`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ actorId, scope }),
+      });
+      assert.equal(grant.status, 201);
+    }
+
     const created = await fetch(`${baseUrl}/api/approvals/payment-export`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ actorId, fileId: protectedFile.id }),
     });
     assert.equal(created.status, 201);
+    const createdBody = await created.json() as { request: { id: string; otp?: string; otp_hash?: string } };
+    assert.equal('otp' in createdBody.request, false);
+    assert.equal('otp_hash' in createdBody.request, false);
+    assert.equal(JSON.stringify(createdBody).includes(deliveredOtp), false);
     const allowed = await fetch(`${baseUrl}/api/approvals?actorId=${actorId}`);
     assert.equal(allowed.status, 200);
     const body = await allowed.json() as { requests: Array<{ actor_id: string; otp_hash?: string }> };
     assert.equal(body.requests.length, 1);
     assert.equal(body.requests[0].actor_id, actorId);
     assert.equal('otp_hash' in body.requests[0], false);
+  });
+
+  it('lists only the authenticated actor’s consent history', async () => {
+    await consent.grant(actorId, 'profile:read');
+    await consent.grant('different-actor', 'audit:read');
+
+    const response = await fetch(`${baseUrl}/api/consents?actorId=different-actor`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { consents: Array<{ actorId: string; scope: string }> };
+    assert.ok(body.consents.some((item) => item.actorId === actorId && item.scope === 'profile:read'));
+    assert.ok(body.consents.every((item) => item.actorId === actorId));
   });
 
   it('requires a valid administrator-delivered OTP to approve a request', async () => {
@@ -124,7 +171,7 @@ describe('authorization route policies', () => {
 
     const authorized = await fetch(`${baseUrl}/api/approvals/${pending.id}/approve`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-test-role': 'admin' },
       body: JSON.stringify({ otp: deliveredOtp }),
     });
     assert.equal(authorized.status, 200);
@@ -149,5 +196,19 @@ describe('authorization route policies', () => {
     const result = await response.json() as { valid: boolean; storageAvailable: boolean };
     assert.equal(result.storageAvailable, true);
     assert.equal(result.valid, true);
+  });
+
+  it('reports an audit-chain integrity failure without treating the chain as valid', async () => {
+    const listAuditEvents = store.listAuditEvents.bind(store);
+    store.listAuditEvents = async () => {
+      const events = await listAuditEvents();
+      return events[0] ? [{ ...events[0], payload_text: `${events[0].payload_text} ` }, ...events.slice(1)] : events;
+    };
+
+    const response = await fetch(`${baseUrl}/api/audit/verify`, { method: 'POST' });
+    assert.equal(response.status, 409);
+    const result = await response.json() as { valid: boolean; error: string };
+    assert.equal(result.valid, false);
+    assert.match(result.error, /modified/);
   });
 });

@@ -45,7 +45,9 @@ export class ConsentProjection {
   }
 
   startPolling(intervalMs = 1000): NodeJS.Timeout {
-    const timer = setInterval(() => { void this.refresh().catch(() => undefined); }, intervalMs);
+    const timer = setInterval(() => {
+      void this.refresh().catch((error) => logApiError('consent_projection.poll', error));
+    }, intervalMs);
     timer.unref();
     return timer;
   }

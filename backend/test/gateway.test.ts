@@ -15,6 +15,30 @@ class CountingStore extends MemoryConsentStore {
 }
 
 describe('fail-closed consent gateway', () => {
+  it('refreshes successfully when the consent store has no records', async () => {
+    const projection = new ConsentProjection(new ConsentService(new MemoryConsentStore()));
+
+    await projection.refresh();
+
+    assert.equal(projection.health().ready, true);
+    assert.equal(projection.health().consistent, true);
+    assert.equal(projection.health().error, null);
+    assert.equal(projection.authorize('actor-1', 'files:read').reason, 'consent_missing');
+  });
+
+  it('fails closed when Supabase reports the consent table missing from its schema cache', async () => {
+    const store = new MemoryConsentStore();
+    store.listConsentEvents = async () => {
+      throw new Error("Could not replay consent events: Could not find the table 'public.consent_events' in the schema cache");
+    };
+    const projection = new ConsentProjection(new ConsentService(store));
+
+    await projection.refresh();
+
+    assert.equal(projection.health().ready, false);
+    assert.equal(projection.authorize('actor-1', 'files:read').reason, 'projection_unavailable');
+  });
+
   it('denies authorization until the projection has initialized', () => {
     const projection = new ConsentProjection(new ConsentService(new MemoryConsentStore()));
     assert.equal(projection.authorize('actor-1', 'files:read').reason, 'projection_unavailable');

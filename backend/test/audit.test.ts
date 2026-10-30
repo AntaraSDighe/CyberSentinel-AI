@@ -10,6 +10,32 @@ function payload(action: string) {
 }
 
 describe('tamper-evident audit chain', () => {
+  it('verifies an empty ledger with no anchored head', async () => {
+    const result = await new AuditService(new MutableAuditStore()).verify();
+
+    assert.equal(result.valid, true);
+    assert.equal(result.storageAvailable, true);
+    assert.equal(result.eventCount, 0);
+    assert.equal(result.lastSequence, 0);
+    assert.equal(result.lastHash, null);
+    assert.equal(result.error, null);
+  });
+
+  it('verifies existing ledger entries against their anchored head', async () => {
+    const store = new MutableAuditStore();
+    await store.appendAuditPayload('first');
+    await store.appendAuditPayload('second');
+
+    const result = await new AuditService(store).verify();
+
+    assert.equal(result.valid, true);
+    assert.equal(result.storageAvailable, true);
+    assert.equal(result.eventCount, 2);
+    assert.equal(result.lastSequence, 2);
+    assert.equal(result.lastHash, store.head?.last_hash);
+    assert.equal(result.error, null);
+  });
+
   it('serializes concurrent writes into a verifiable chain', async () => {
     const store = new MemoryConsentStore();
     const audit = new AuditService(store);
@@ -19,6 +45,16 @@ describe('tamper-evident audit chain', () => {
     assert.equal(verification.valid, true);
     assert.equal(verification.eventCount, 24);
     assert.deepEqual(results.map((event) => event.sequence).sort((a, b) => a - b), Array.from({ length: 24 }, (_, index) => index + 1));
+  });
+
+  it('scopes audit-event payloads to the authenticated actor unless the caller is an admin', async () => {
+    const audit = new AuditService(new MemoryConsentStore());
+    await audit.initialize();
+    await audit.record({ ...payload('private-one'), actorId: 'actor-one' });
+    await audit.record({ ...payload('private-two'), actorId: 'actor-two' });
+
+    assert.deepEqual((await audit.list(100, 'actor-one')).map((event) => event.payload?.actorId), ['actor-one']);
+    assert.equal((await audit.list(100)).length, 2);
   });
 
   it('detects payload modification and a broken link', () => {
@@ -54,6 +90,23 @@ describe('tamper-evident audit chain', () => {
       async getAuditHead() { throw new Error('database error'); },
     };
     const result = await new AuditService(store).verify();
+    assert.equal(result.valid, false);
+    assert.equal(result.storageAvailable, false);
+    assert.equal(result.error, 'Audit storage unavailable');
+  });
+
+  it('does not verify successfully when Supabase reports a missing audit table', async () => {
+    const store: AuditStore = {
+      mode: 'Supabase PostgreSQL',
+      async appendAuditPayload() { throw new Error('not used'); },
+      async listAuditEvents() { return []; },
+      async getAuditHead() {
+        throw new Error("Could not read audit chain head: Could not find the table 'public.audit_chain_heads' in the schema cache");
+      },
+    };
+
+    const result = await new AuditService(store).verify();
+
     assert.equal(result.valid, false);
     assert.equal(result.storageAvailable, false);
     assert.equal(result.error, 'Audit storage unavailable');

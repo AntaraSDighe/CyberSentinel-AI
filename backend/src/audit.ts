@@ -54,9 +54,11 @@ export class AuditService {
     });
   }
 
-  async list(limit = 100): Promise<Array<AuditEvent & { payload: AuditPayload | null }>> {
+  async list(limit = 100, actorId?: string): Promise<Array<AuditEvent & { payload: AuditPayload | null }>> {
     const events = await this.store.listAuditEvents();
-    return events.slice(-limit).reverse().map((event) => ({ ...event, payload: parsePayload(event.payload_text) }));
+    return events.slice(-limit).reverse()
+      .map((event) => ({ ...event, payload: parsePayload(event.payload_text) }))
+      .filter((event) => actorId === undefined || event.payload?.actorId === actorId);
   }
 
   async historyForResource(resource: string, limit = 100): Promise<Array<AuditEvent & { payload: AuditPayload | null }>> {

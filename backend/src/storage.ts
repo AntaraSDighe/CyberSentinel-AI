@@ -32,19 +32,58 @@ export interface ProtectedDataStore {
 
 export interface ApplicationStore extends PlatformStore, ProtectedDataStore {
   readonly databaseConfigured: boolean;
+  readonly configurationError: string | null;
+  getActorRole(actorId: string): Promise<string | null>;
+  consumeRateLimit(bucketHash: string, windowSeconds: number, maximum: number): Promise<{
+    allowed: boolean;
+    retryAfterSeconds: number;
+    remaining: number;
+  }>;
+  verifySchema(): Promise<void>;
 }
 
 export class MemoryConsentStore implements ApplicationStore {
   readonly databaseConfigured = false;
   readonly mode = 'in-memory development storage (ephemeral; data is lost on restart)';
+  readonly configurationError: string;
   private readonly events: ConsentEvent[] = [];
   private readonly auditEvents: AuditEvent[] = [];
   private readonly files = new Map<string, ProtectedFileRecord>();
   private readonly approvals = new Map<string, ApprovalRequest>();
   private readonly actors = new Set<string>();
+  private readonly rateLimitBuckets = new Map<string, { windowStartedAt: number; count: number }>();
+
+  constructor(configurationError = 'Supabase credentials are not configured') {
+    this.configurationError = `${configurationError}; using temporary in-memory storage; data is lost when the backend restarts`;
+  }
+
+  async verifySchema(): Promise<void> {}
 
   async ensureActor(actorId: string): Promise<void> {
     this.actors.add(actorId);
+  }
+
+  async getActorRole(actorId: string): Promise<string | null> {
+    return this.actors.has(actorId) ? 'user' : null;
+  }
+
+  async consumeRateLimit(
+    bucketHash: string,
+    windowSeconds: number,
+    maximum: number,
+    now = Date.now(),
+  ): Promise<{ allowed: boolean; retryAfterSeconds: number; remaining: number }> {
+    const windowMs = windowSeconds * 1000;
+    const bucket = this.rateLimitBuckets.get(bucketHash);
+    const current = !bucket || now - bucket.windowStartedAt >= windowMs
+      ? { windowStartedAt: now, count: 1 }
+      : { ...bucket, count: Math.min(bucket.count + 1, maximum + 1) };
+    this.rateLimitBuckets.set(bucketHash, current);
+    return {
+      allowed: current.count <= maximum,
+      retryAfterSeconds: Math.max(1, Math.ceil((current.windowStartedAt + windowMs - now) / 1000)),
+      remaining: Math.max(0, maximum - current.count),
+    };
   }
 
   async appendConsentEvent(event: ConsentEvent): Promise<ConsentEvent> {
@@ -118,32 +157,97 @@ export class MemoryConsentStore implements ApplicationStore {
 class SupabaseConsentStore implements ApplicationStore {
   readonly databaseConfigured = true;
   readonly mode = 'Supabase PostgreSQL';
+  readonly configurationError = null;
 
   constructor(private readonly client: SupabaseClient<any>) {}
 
+  async verifySchema(): Promise<void> {
+    const tables = [
+      'actor_profiles',
+      'consent_events',
+      'audit_events',
+      'audit_chain_heads',
+      'protected_files',
+      'approval_requests',
+      'api_rate_limit_buckets',
+    ];
+    for (const table of tables) {
+      const result = await this.client.from(table).select('*').limit(0);
+      if (result.error) {
+        throwSupabaseError(`Could not verify the ${table} table; apply all Supabase migrations`, result.error, result.status);
+      }
+    }
+
+    const rateLimitProbe = await this.client.rpc('consume_api_rate_limit', {
+      p_bucket_hash: 'invalid',
+      p_window_seconds: 60,
+      p_maximum: 1,
+    });
+    if (rateLimitProbe.error?.code !== 'P0001' ||
+      rateLimitProbe.error.message !== 'Invalid rate limit parameters') {
+      if (rateLimitProbe.error) {
+        throwSupabaseError(
+          'Could not verify the shared rate-limit function; apply the shared rate-limit migration and grant service_role access',
+          rateLimitProbe.error,
+          rateLimitProbe.status,
+        );
+      }
+      throw new Error('The shared rate-limit function accepted invalid verification parameters');
+    }
+  }
+
   async ensureActor(actorId: string): Promise<void> {
-    const { error } = await this.client.from('actor_profiles').upsert({ actor_id: actorId }, { onConflict: 'actor_id' });
-    if (error) throw new Error(`Could not verify actor profile: ${error.message}`);
+    const result = await this.client.from('actor_profiles').upsert({ actor_id: actorId }, { onConflict: 'actor_id' });
+    if (result.error) throwSupabaseError('Could not verify actor profile', result.error, result.status);
+  }
+
+  async getActorRole(actorId: string): Promise<string | null> {
+    const result = await this.client.from('actor_profiles').select('role').eq('actor_id', actorId).maybeSingle();
+    if (result.error) throwSupabaseError('Could not verify actor role', result.error, result.status);
+    return typeof result.data?.role === 'string' ? result.data.role : null;
+  }
+
+  async consumeRateLimit(
+    bucketHash: string,
+    windowSeconds: number,
+    maximum: number,
+  ): Promise<{ allowed: boolean; retryAfterSeconds: number; remaining: number }> {
+    const result = await this.client.rpc('consume_api_rate_limit', {
+      p_bucket_hash: bucketHash,
+      p_window_seconds: windowSeconds,
+      p_maximum: maximum,
+    });
+    if (result.error) throwSupabaseError('Could not apply shared rate limit', result.error, result.status);
+    const row = Array.isArray(result.data) ? result.data[0] : result.data;
+    if (!row || typeof row.allowed !== 'boolean' || !Number.isInteger(row.retry_after_seconds) ||
+      !Number.isInteger(row.remaining)) {
+      throw new Error('Shared rate limit returned an invalid response');
+    }
+    return {
+      allowed: row.allowed,
+      retryAfterSeconds: row.retry_after_seconds,
+      remaining: row.remaining,
+    };
   }
 
   async appendConsentEvent(event: ConsentEvent): Promise<ConsentEvent> {
-    const { data, error } = await this.client.from('consent_events').insert(event).select('*').single();
-    if (error) throw new Error(`Could not append consent event: ${error.message}`);
-    return data as ConsentEvent;
+    const result = await this.client.from('consent_events').insert(event).select('*').single();
+    if (result.error) throwSupabaseError('Could not append consent event', result.error, result.status);
+    return result.data as ConsentEvent;
   }
 
   async listConsentEvents(actorId?: string): Promise<ConsentEvent[]> {
     let query = this.client.from('consent_events').select('*').order('occurred_at', { ascending: true });
     if (actorId) query = query.eq('actor_id', actorId);
-    const { data, error } = await query;
-    if (error) throw new Error(`Could not replay consent events: ${error.message}`);
-    return data as ConsentEvent[];
+    const result = await query;
+    if (result.error) throwSupabaseError('Could not replay consent events', result.error, result.status);
+    return result.data as ConsentEvent[];
   }
 
   async appendAuditPayload(payloadText: string): Promise<AuditEvent> {
-    const { data, error } = await this.client.rpc('append_audit_event', { p_payload_text: payloadText });
-    if (error) throw new Error(`Could not append audit event: ${error.message}`);
-    const row = Array.isArray(data) ? data[0] : data;
+    const result = await this.client.rpc('append_audit_event', { p_payload_text: payloadText });
+    if (result.error) throwSupabaseError('Could not append audit event', result.error, result.status);
+    const row = Array.isArray(result.data) ? result.data[0] : result.data;
     if (!row) throw new Error('Audit append returned no record');
     return {
       sequence: Number(row.sequence),
@@ -154,65 +258,92 @@ class SupabaseConsentStore implements ApplicationStore {
   }
 
   async listAuditEvents(): Promise<AuditEvent[]> {
-    const { data, error } = await this.client.from('audit_events').select('*').order('sequence', { ascending: true });
-    if (error) throw new Error(`Could not read audit history: ${error.message}`);
-    return (data ?? []).map((row: any) => ({
+    const result = await this.client.from('audit_events').select('*').order('sequence', { ascending: true });
+    if (result.error) throwSupabaseError('Could not read audit history', result.error, result.status);
+    return (result.data ?? []).map((row: any) => ({
       sequence: Number(row.sequence), payload_text: row.payload_text,
       previous_hash: row.previous_hash, event_hash: row.event_hash,
     }));
   }
 
   async getAuditHead(): Promise<AuditHead | null> {
-    const { data, error } = await this.client.from('audit_chain_heads').select('*').eq('id', 1).maybeSingle();
-    if (error) throw new Error(`Could not read audit chain head: ${error.message}`);
-    return data ? { sequence: Number(data.sequence), last_hash: data.last_hash } : null;
+    const result = await this.client.from('audit_chain_heads').select('*').eq('id', 1).maybeSingle();
+    if (result.error) throwSupabaseError('Could not read audit chain head', result.error, result.status);
+    return result.data ? { sequence: Number(result.data.sequence), last_hash: result.data.last_hash } : null;
   }
 
   async insertProtectedFile(file: ProtectedFileRecord): Promise<ProtectedFileRecord> {
-    const { data, error } = await this.client.from('protected_files').insert(file).select('*').single();
-    if (error) throw new Error(`Could not register protected file: ${error.message}`);
-    return data as ProtectedFileRecord;
+    const result = await this.client.from('protected_files').insert(file).select('*').single();
+    if (result.error) throwSupabaseError('Could not register protected file', result.error, result.status);
+    return result.data as ProtectedFileRecord;
   }
 
   async getProtectedFile(id: string): Promise<ProtectedFileRecord | null> {
-    const { data, error } = await this.client.from('protected_files').select('*').eq('id', id).maybeSingle();
-    if (error) throw new Error(`Could not read protected file: ${error.message}`);
-    return data as ProtectedFileRecord | null;
+    const result = await this.client.from('protected_files').select('*').eq('id', id).maybeSingle();
+    if (result.error) throwSupabaseError('Could not read protected file', result.error, result.status);
+    return result.data as ProtectedFileRecord | null;
   }
 
   async listProtectedFiles(actorId?: string): Promise<ProtectedFileRecord[]> {
     let query = this.client.from('protected_files').select('*').order('created_at', { ascending: false });
     if (actorId) query = query.eq('actor_id', actorId);
-    const { data, error } = await query;
-    if (error) throw new Error(`Could not list protected files: ${error.message}`);
-    return (data ?? []) as ProtectedFileRecord[];
+    const result = await query;
+    if (result.error) throwSupabaseError('Could not list protected files', result.error, result.status);
+    return (result.data ?? []) as ProtectedFileRecord[];
   }
 
   async insertApproval(request: ApprovalRequest): Promise<ApprovalRequest> {
-    const { data, error } = await this.client.from('approval_requests').insert(request).select('*').single();
-    if (error) throw new Error(`Could not create approval request: ${error.message}`);
-    return data as ApprovalRequest;
+    const result = await this.client.from('approval_requests').insert(request).select('*').single();
+    if (result.error) throwSupabaseError('Could not create approval request', result.error, result.status);
+    return result.data as ApprovalRequest;
   }
 
   async getApproval(id: string): Promise<ApprovalRequest | null> {
-    const { data, error } = await this.client.from('approval_requests').select('*').eq('id', id).maybeSingle();
-    if (error) throw new Error(`Could not read approval request: ${error.message}`);
-    return data as ApprovalRequest | null;
+    const result = await this.client.from('approval_requests').select('*').eq('id', id).maybeSingle();
+    if (result.error) throwSupabaseError('Could not read approval request', result.error, result.status);
+    return result.data as ApprovalRequest | null;
   }
 
   async listApprovals(actorId?: string): Promise<ApprovalRequest[]> {
     let query = this.client.from('approval_requests').select('*').order('created_at', { ascending: false });
     if (actorId) query = query.eq('actor_id', actorId);
-    const { data, error } = await query;
-    if (error) throw new Error(`Could not list approval requests: ${error.message}`);
-    return (data ?? []) as ApprovalRequest[];
+    const result = await query;
+    if (result.error) throwSupabaseError('Could not list approval requests', result.error, result.status);
+    return (result.data ?? []) as ApprovalRequest[];
   }
 
   async updateApproval(request: ApprovalRequest): Promise<ApprovalRequest> {
-    const { data, error } = await this.client.from('approval_requests').update(request).eq('id', request.id).select('*').single();
-    if (error) throw new Error(`Could not update approval request: ${error.message}`);
-    return data as ApprovalRequest;
+    const result = await this.client.from('approval_requests').update(request).eq('id', request.id).select('*').single();
+    if (result.error) throwSupabaseError('Could not update approval request', result.error, result.status);
+    return result.data as ApprovalRequest;
   }
+}
+
+interface SupabaseErrorResponse {
+  message: string;
+  code?: string;
+  details?: string | null;
+  hint?: string | null;
+}
+
+class SupabaseStorageError extends Error {
+  readonly code?: string;
+  readonly status: number;
+  readonly details?: string;
+  readonly hint?: string;
+
+  constructor(operation: string, error: SupabaseErrorResponse, status: number) {
+    super(`${operation}: ${error.message}`);
+    this.name = 'SupabaseStorageError';
+    this.code = error.code;
+    this.status = status;
+    this.details = error.details ?? undefined;
+    this.hint = error.hint ?? undefined;
+  }
+}
+
+function throwSupabaseError(operation: string, error: SupabaseErrorResponse, status: number): never {
+  throw new SupabaseStorageError(operation, error, status);
 }
 
 function cloneFile(file: ProtectedFileRecord): ProtectedFileRecord {
@@ -220,32 +351,55 @@ function cloneFile(file: ProtectedFileRecord): ProtectedFileRecord {
 }
 
 export function createConsentStore(env: NodeJS.ProcessEnv = process.env): ApplicationStore {
-  const url = env.SUPABASE_URL;
-  const serviceRoleKey = env.SUPABASE_SERVICE_ROLE_KEY;
-  if (Boolean(url) !== Boolean(serviceRoleKey)) {
-    throw new Error('Both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to enable Supabase storage');
+  const url = env.SUPABASE_URL?.trim();
+  const serviceRoleKey = env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!url && !serviceRoleKey) {
+    return env.NODE_ENV === 'production'
+      ? memoryOrFail(env, 'Both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to enable Supabase storage')
+      : new MemoryConsentStore();
   }
-  if (!url || !serviceRoleKey) return new MemoryConsentStore();
+  if (!url || !serviceRoleKey) {
+    return memoryOrFail(env, 'Both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to enable Supabase storage');
+  }
 
   let projectUrl: URL;
   try {
     projectUrl = new URL(url);
   } catch {
-    throw new Error('SUPABASE_URL must be a valid HTTP(S) URL');
+    return memoryOrFail(env, 'SUPABASE_URL must be a valid HTTP(S) URL');
   }
   if (!['http:', 'https:'].includes(projectUrl.protocol) || !projectUrl.hostname || projectUrl.username || projectUrl.password) {
-    throw new Error('SUPABASE_URL must be a valid HTTP(S) URL');
+    return memoryOrFail(env, 'SUPABASE_URL must be a valid HTTP(S) URL');
+  }
+  if (env.NODE_ENV === 'production' && projectUrl.protocol !== 'https:') {
+    return memoryOrFail(env, 'Production SUPABASE_URL must use HTTPS');
   }
 
   const isSecretKey = /^sb_secret_[A-Za-z0-9_-]+$/.test(serviceRoleKey);
-  const isLegacyServiceKey = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(serviceRoleKey);
+  const isLegacyServiceKey = isLegacyServiceRoleKey(serviceRoleKey);
   if (!isSecretKey && !isLegacyServiceKey) {
-    throw new Error('SUPABASE_SERVICE_ROLE_KEY is not in a recognized Supabase key format');
+    return memoryOrFail(env, 'SUPABASE_SERVICE_ROLE_KEY must be a Supabase server-side secret or service_role JWT');
   }
 
   try {
     return new SupabaseConsentStore(createClient<any>(projectUrl.toString(), serviceRoleKey, { auth: { persistSession: false } }));
   } catch {
-    throw new Error('Could not initialize Supabase client; check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+    return memoryOrFail(env, 'Could not initialize Supabase client; check the Supabase server-side configuration');
+  }
+}
+
+function memoryOrFail(env: NodeJS.ProcessEnv, reason: string): ApplicationStore {
+  if (env.NODE_ENV === 'production') throw new Error(`Production storage configuration failed: ${reason}`);
+  return new MemoryConsentStore(reason);
+}
+
+function isLegacyServiceRoleKey(key: string): boolean {
+  const parts = key.split('.');
+  if (parts.length !== 3 || parts.some((part) => !/^[A-Za-z0-9_-]+$/.test(part))) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as { role?: unknown };
+    return payload.role === 'service_role';
+  } catch {
+    return false;
   }
 }

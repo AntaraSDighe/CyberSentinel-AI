@@ -1,0 +1,16 @@
+{
+  "installCommand": "npm ci",
+  "buildCommand": "npm test --workspace backend && npm run build",
+  "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/[...path].ts": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
