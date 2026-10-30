@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, projectRoot, '');
   const supabaseUrl = env.VITE_SUPABASE_URL?.trim();
   const supabaseAnonKey = env.VITE_SUPABASE_ANON_KEY?.trim();
+  const apiBaseUrl = env.VITE_API_BASE_URL?.trim();
   if (mode === 'production') {
     if (!supabaseUrl || !supabaseAnonKey) {
       throw new Error('VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are required for production authentication.');
@@ -26,12 +27,28 @@ export default defineConfig(({ mode }) => {
     if (isServiceRoleKey(supabaseAnonKey)) {
       throw new Error('VITE_SUPABASE_ANON_KEY must be the public Supabase key, never a service-role key.');
     }
+    if (apiBaseUrl) {
+      let apiUrl: URL;
+      try {
+        apiUrl = new URL(apiBaseUrl);
+      } catch {
+        throw new Error('VITE_API_BASE_URL must be an HTTPS origin for the backend API.');
+      }
+      if (apiUrl.protocol !== 'https:' || apiUrl.username || apiUrl.password ||
+        apiUrl.pathname !== '/' || apiUrl.search || apiUrl.hash) {
+        throw new Error('VITE_API_BASE_URL must be an HTTPS origin without a path when configured.');
+      }
+    }
   }
   const configuredTarget = env.CYBERSENTINEL_API_URL || `http://127.0.0.1:${process.env.PORT ?? env.PORT ?? '3001'}`;
   const targetUrl = new URL(configuredTarget);
   if (targetUrl.hostname === 'localhost') targetUrl.hostname = '127.0.0.1';
 
   return {
+    envDir: projectRoot,
+    define: {
+      __API_BASE_URL__: JSON.stringify(apiBaseUrl ?? ''),
+    },
     plugins: [react(), tailwindcss()],
     server: {
       host: '0.0.0.0',

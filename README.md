@@ -43,7 +43,7 @@ The Supabase service-role key is privileged and must remain in the backend envir
 
 ## Production deployment (Vercel)
 
-The Vercel project uses the repository root (`.`) as its Root Directory. The root `vercel.json` runs the backend tests and both workspace builds, publishes `frontend/dist`, and declares `api/[...path].ts` as the Node.js function for `/api/*`. That function initializes and invokes the existing Express application, preserving its routes and middleware. The final rewrite sends non-file frontend routes to `index.html`; API paths are handled by the function. The browser uses relative `/api/...` requests, so the frontend and API share one Vercel origin. Local development continues to use Vite's `/api` proxy with `npm run dev`.
+The single-project setup uses the repository root (`.`) as its Root Directory. The root `vercel.json` runs the backend tests and both workspace builds, publishes `frontend/dist`, and declares `api/[...path].ts` as the Node.js function for `/api/*`. That function initializes and invokes the existing Express application, preserving its routes and middleware. The final rewrite sends non-file frontend routes to `index.html`; API paths are handled by the function. With this setup, leave `VITE_API_BASE_URL` unset so the browser uses same-origin `/api/...` requests. If the frontend and API are deployed as separate Vercel projects, set `VITE_API_BASE_URL` to the backend project's HTTPS origin in the frontend project's build environment; the API function must still be deployed from the repository root so Vercel includes `api/[...path].ts`. Configure the backend's `CORS_ORIGIN` to the frontend's exact HTTPS origin for cross-origin browser requests. Local development continues to use relative requests and Vite's `/api` proxy with `npm run dev`.
 
 ### Before deploying
 
@@ -55,10 +55,10 @@ The Vercel project uses the repository root (`.`) as its Root Directory. The roo
    - `supabase/migrations/202610300002_shared_rate_limits.sql`
 
    Reconcile schema differences before applying SQL. Migrations are not run automatically. The rate-limit migration creates the shared PostgreSQL buckets and atomic `consume_api_rate_limit` function. Its arguments are `p_bucket_hash`, `p_window_seconds`, and `p_maximum`, and its result columns are `allowed`, `retry_after_seconds`, and `remaining`. Production startup verifies the function and fails closed if it is missing or inaccessible; do not disable rate limiting to recover service.
-2. Set Vercel's Root Directory to the repository root. The checked-in configuration uses `npm ci`, build command `npm test --workspace backend && npm run build`, and output directory `frontend/dist`. Keep the API function in the root `api/` directory.
+2. For the single-project deployment, set Vercel's Root Directory to the repository root and Framework Preset to **Other**. The checked-in configuration uses `npm ci`, build command `npm test --workspace backend && npm run build`, and output directory `frontend/dist`. Keep the API function in the root `api/` directory.
 3. Configure these Vercel environment variable names for the relevant Production deployment:
    - Required backend values: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, and `OTP_SECRET`.
-   - Required frontend build values: `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. These are public Supabase Auth settings, not secrets. Never put a server secret in a `VITE_` variable.
+   - Required frontend build values: `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. These are public Supabase Auth settings, not secrets. `VITE_API_BASE_URL` is optional: leave it unset when the API function is on the same origin; for a separately deployed backend, set it to that backend's HTTPS origin. Never put a server secret in a `VITE_` variable.
    - Configure one complete OTP delivery group: `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, and `ADMIN_EMAIL`; **or** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. `SMTP_PORT` and `SMTP_SECURE` are optional.
    - `GEMINI_MODEL` and `CORS_ORIGIN` are optional. Same-origin deployment does not require `CORS_ORIGIN`.
 

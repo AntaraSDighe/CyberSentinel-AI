@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
 import { developmentDemoEnabled, getAccessToken, supabaseAuthClient } from './auth-client';
+import { getApiRequestUrl } from './api-url';
 
 type Theme = 'light' | 'dark';
 
@@ -61,7 +62,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
     const accessToken = await getAccessToken();
-    response = await fetch(path, {
+    response = await fetch(getApiRequestUrl(path, import.meta.env.MODE, __API_BASE_URL__), {
       ...options,
       headers: {
         ...(options?.body ? { 'content-type': 'application/json' } : {}),
@@ -70,7 +71,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
       },
     });
   } catch {
-    throw new Error('Cannot reach the same-origin API. Check that the application server is available, or start both services with "npm run dev" for local development.');
+    throw new Error('Cannot reach the API. Check the configured API URL and server availability, or start both services with "npm run dev" for local development.');
   }
 
   let body: unknown;
