@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, describe, it } from 'node:test';
-import { createVercelHandler } from '../../api/[...path].js';
+import { createVercelHandler } from '../src/vercel-function.js';
 
 describe('Vercel API function adapter', () => {
   const previousNodeEnv = process.env.NODE_ENV;
@@ -36,22 +36,30 @@ describe('Vercel API function adapter', () => {
   });
 
   it('passes health and API paths through the existing Express routers', async () => {
-    const routes: Array<[string, number]> = [
-      ['/api/health', 200],
-      ['/api/consents', 200],
-      ['/api/files', 403],
-      ['/api/approvals', 403],
-      ['/api/approvals/status', 200],
-      ['/api/ai/status', 200],
-      ['/api/consents/demo-actor/audit:read/events', 200],
+    const routes: Array<[string, number, (body: Record<string, unknown>) => void]> = [
+      ['/api/health', 200, (body) => {
+        assert.equal(body.service, 'cybersentinel-api');
+        assert.equal(typeof body.database, 'object');
+        assert.equal(typeof body.gateway, 'object');
+        assert.equal(typeof body.audit, 'object');
+      }],
+      ['/api/consents', 200, (body) => assert.ok(Array.isArray(body.consents))],
+      ['/api/files', 403, (body) => assert.equal(body.allowed, false)],
+      ['/api/approvals', 403, (body) => assert.equal(body.allowed, false)],
+      ['/api/approvals/status', 200, (body) => assert.equal(typeof body.available, 'boolean')],
+      ['/api/ai/status', 200, (body) => assert.equal(typeof body.available, 'boolean')],
+      ['/api/consents/demo-actor/audit:read/events', 200, (body) => assert.ok(Array.isArray(body.events))],
     ];
 
-    for (const [path, expectedStatus] of routes) {
+    for (const [path, expectedStatus, assertBody] of routes) {
       const response = await fetch(`${baseUrl}${path}`, {
+        method: 'GET',
         headers: { accept: 'application/json' },
       });
       assert.equal(response.status, expectedStatus, path);
       assert.match(response.headers.get('content-type') ?? '', /application\/json/, path);
+      const body = await response.json() as Record<string, unknown>;
+      assertBody(body);
     }
     assert.equal(refreshCount, routes.length);
   });
